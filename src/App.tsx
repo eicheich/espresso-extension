@@ -324,7 +324,7 @@ export default function App() {
           </div>
           <div>
             <h1 className="text-[15px] font-semibold leading-tight tracking-tight text-[#1D1D1F]">
-              Lazy Prompt
+              Espresso
             </h1>
             <p className="text-[11px] text-neutral-500">Hybrid On-Device &amp; Cloud AI</p>
           </div>

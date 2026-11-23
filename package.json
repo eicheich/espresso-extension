@@ -1,8 +1,8 @@
 {
-  "name": "lazy-prompt-hybrid",
+  "name": "espresso-extension",
   "version": "1.0.0",
   "private": true,
-  "description": "Lazy Prompt — Hybrid On-Device & Cloud AI Chrome Extension (Manifest V3)",
+  "description": "Espresso — Instant One-Click Hybrid On-Device & Cloud AI Chrome Extension (Manifest V3)",
   "type": "module",
   "scripts": {
     "dev": "vite",

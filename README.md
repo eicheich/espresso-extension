@@ -1,6 +1,6 @@
-# Lazy Prompt — Hybrid On-Device & Cloud AI Chrome Extension
+# Espresso — Instant Hybrid On-Device & Cloud AI Chrome Extension
 
-**Lazy Prompt** is a minimalist Manifest V3 Chrome Side Panel extension built for the **Devpost #BuildHybridAI 2026** hackathon. It turns your most-used AI prompts into 1-click actions over any webpage or highlighted selection—running privately on-device with **Gemini Nano** via Chrome's built-in Prompt API whenever possible, and seamlessly falling back to **Gemini Cloud** via Firebase AI Logic when needed.
+**Espresso** (`espresso-extension`) is a minimalist Manifest V3 Chrome Side Panel extension built for the **Devpost #BuildHybridAI 2026** hackathon. It delivers instant 1-click Hybrid AI shots over any webpage or highlighted selection—running privately on-device with **Gemini Nano** via Chrome's built-in Prompt API whenever possible, and seamlessly falling back to **Gemini Cloud** via Firebase AI Logic when needed.
 
 ---
 
@@ -12,7 +12,7 @@
   - Falls back to clean article extraction using **`@mozilla/readability`** (with cleaned `document.body.innerText` fallback) labeled **`Context: Full Page`**, stripping navigation, ads, and boilerplate.
   - Displays a live approximate token meter (`~X / 9,216 tokens`) before and during execution so users see at a glance whether the payload fits within Gemini Nano's local window or will trigger Cloud Fallback.
 - **Streaming Hybrid Inference (`firebase/ai`):**
-  - Uses `generateContentStream` with `InferenceMode.PREFER_ON_DEVICE`, `GoogleAIBackend()`, and a flagship cloud fallback chain (`gemini-4-hydrogen` → `gemini-3.8-flash` → `gemini-3.5-flash-lite`) for resilient real-time Markdown streaming.
+  - Uses `generateContentStream` with `InferenceMode.PREFER_ON_DEVICE`, `GoogleAIBackend()`, and a fast cloud fallback chain (`gemini-3.5-flash-lite` → `gemini-4-hydrogen` → `gemini-3.8-flash`) for resilient real-time Markdown streaming.
   - Respects Chrome's **User Activation Rule**: `model.initializeDeviceModel()` is called *only* inside explicit user click handlers (**Run** or **Warm Up Local AI**), never on page load.
   - Renders a transparent **Inference Source Badge** on every result:
     - `⚡ On-Device (Gemini Nano 4 • Private)` when executed locally (`on_device`)
@@ -48,7 +48,7 @@ To test local on-device inference (otherwise requests automatically route to Gem
    - `chrome://flags/#prompt-api-for-gemini-nano-multimodal-input` → **Enabled**
    - `chrome://flags/#optimization-guide-on-device-model` → **Enabled BypassPerfRequirement**
 3. Relaunch Chrome.
-4. Click **Warm Up Local AI** (or run any prompt) in the Lazy Prompt Side Panel to trigger Chrome's on-device model download/initialization.
+4. Click **Warm Up Local AI** (or run any prompt) in the Espresso Side Panel to trigger Chrome's on-device model download/initialization.
 
 ---
 
@@ -75,11 +75,11 @@ To test local on-device inference (otherwise requests automatically route to Gem
 
 ### App Check Debug Token Setup (For Judges & `chrome-extension://` Origin)
 
-Chrome extensions run under the `chrome-extension://` origin, where standard web reCAPTCHA challenges cannot run. Lazy Prompt configures Firebase App Check in **Debug Token Mode** (`(self as any).FIREBASE_APPCHECK_DEBUG_TOKEN = import.meta.env.VITE_APPCHECK_DEBUG_TOKEN || true` before `initializeAppCheck()`).
+Chrome extensions run under the `chrome-extension://` origin, where standard web reCAPTCHA challenges cannot run. Espresso configures Firebase App Check in **Debug Token Mode** (`(self as any).FIREBASE_APPCHECK_DEBUG_TOKEN = import.meta.env.VITE_APPCHECK_DEBUG_TOKEN || true` before `initializeAppCheck()`).
 
 To authorize your local extension build when App Check enforcement is enabled:
 - **Option A — Auto-generated token:**
-  1. Leave `VITE_APPCHECK_DEBUG_TOKEN=` blank in `.env`, build, and open the Lazy Prompt Side Panel.
+  1. Leave `VITE_APPCHECK_DEBUG_TOKEN=` blank in `.env`, build, and open the Espresso Side Panel.
   2. Right-click inside the Side Panel → **Inspect** → open the **Console** tab.
   3. Copy the printed UUID from `AppCheck debug token: "<UUID>"`.
   4. Register that UUID in **Firebase Console → App Check → Apps → (Your Web App) → Manage debug tokens**.
@@ -94,6 +94,8 @@ To authorize your local extension build when App Check enforcement is enabled:
 All scripts and dependencies are bundled locally into `dist/` with zero remotely hosted code.
 
 ```bash
+git clone https://github.com/<your-username>/espresso-extension.git
+cd espresso-extension
 npm install
 npm run build
 ```
@@ -103,7 +105,7 @@ Then load the extension in Chrome:
 1. Navigate to `chrome://extensions`.
 2. Toggle **Developer mode** ON (top right).
 3. Click **Load unpacked** and select the generated **`dist/`** directory.
-4. Pin **Lazy Prompt** to the Chrome toolbar and click its icon on any webpage to open the Side Panel.
+4. Pin **Espresso** to the Chrome toolbar and click its icon on any webpage to open the Side Panel.
 
 ---
 

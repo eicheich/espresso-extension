@@ -1,8 +1,9 @@
 {
   "manifest_version": 3,
-  "name": "Lazy Prompt",
+  "name": "Espresso",
+  "short_name": "Espresso",
   "version": "1.0.0",
-  "description": "One-click hybrid AI prompt runner for Chrome Side Panel powered by on-device Gemini Nano with automatic Gemini Cloud fallback.",
+  "description": "Instant one-click Hybrid AI shots for any webpage — powered by on-device Gemini Nano with automatic Gemini Cloud fallback.",
   "permissions": [
     "sidePanel",
     "activeTab",
@@ -15,7 +16,7 @@
     "https://*/*"
   ],
   "action": {
-    "default_title": "Open Lazy Prompt",
+    "default_title": "Open Espresso",
     "default_icon": {
       "16": "icons/icon-16.png",
       "48": "icons/icon-48.png",
