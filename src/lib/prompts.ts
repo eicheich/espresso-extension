@@ -12,7 +12,7 @@ const STORAGE_KEY = 'lazy_prompt_items';
 export const STARTER_PROMPTS: PromptItem[] = [
   {
     id: 'starter-tldr',
-    title: 'TL;DR Bullet Summary',
+    title: 'Quick Summary',
     category: 'Summary',
     instruction:
       'Summarize the provided text into 5 concise, high-signal bullet points. Lead with the core thesis and include only essential facts or numbers.',
@@ -21,7 +21,7 @@ export const STARTER_PROMPTS: PromptItem[] = [
   },
   {
     id: 'starter-takeaways',
-    title: 'Extract Key Takeaways',
+    title: 'Key Takeaways',
     category: 'Insights',
     instruction:
       'Extract the most actionable takeaways, key decisions, and open questions from this content. Group them cleanly under short Markdown headings.',
@@ -30,7 +30,7 @@ export const STARTER_PROMPTS: PromptItem[] = [
   },
   {
     id: 'starter-eli5',
-    title: "Explain Like I'm 5",
+    title: 'Explain Simply',
     category: 'Learning',
     instruction:
       'Explain the main concepts in plain, jargon-free English as if explaining to a curious beginner. Use one concrete everyday analogy.',
@@ -39,7 +39,7 @@ export const STARTER_PROMPTS: PromptItem[] = [
   },
   {
     id: 'starter-tech-docs',
-    title: 'Technical Docs Breakdown',
+    title: 'Technical Breakdown',
     category: 'Engineering',
     instruction:
       'Break down this technical content for a software engineer: state the purpose, architecture or API surface, prerequisites, gotchas, and a minimal usage example if applicable.',
@@ -47,6 +47,10 @@ export const STARTER_PROMPTS: PromptItem[] = [
     updatedAt: 1,
   },
 ];
+
+export function isBuiltInPrompt(prompt: PromptItem): boolean {
+  return prompt.id.startsWith('starter-');
+}
 
 export function sortPrompts(items: PromptItem[]): PromptItem[] {
   return [...items].sort((a, b) => a.order - b.order || a.updatedAt - b.updatedAt);

@@ -1,16 +1,20 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
 import {
   ArrowDown,
   ArrowUp,
+  CheckCircle2,
   Cloud,
   Cpu,
+  FileText,
   Pencil,
   Play,
   Plus,
   RefreshCw,
+  Search,
   Sparkles,
   Trash2,
+  X,
 } from 'lucide-react';
 import { isFirebaseConfigured } from './lib/firebase';
 import { buildHybridPrompt, runHybridPrompt, warmUpLocalModel } from './lib/ai';
@@ -22,10 +26,12 @@ import {
   type PageContext,
 } from './lib/context';
 import {
+  isBuiltInPrompt,
   loadLocalPrompts,
   reorderPrompts,
   saveLocalPrompts,
   sortPrompts,
+  STARTER_PROMPTS,
   type PromptItem,
 } from './lib/prompts';
 import {
@@ -40,8 +46,16 @@ import { OutputCard } from './components/OutputCard';
 import { PromptFormModal } from './components/PromptFormModal';
 
 type LocalAiStatus = 'idle' | 'warming' | 'ready' | 'fallback';
+type AppView = 'prompts' | 'results';
+type LibraryTab = 'discover' | 'my-prompts';
 
 export default function App() {
+  const [activeView, setActiveView] = useState<AppView>('prompts');
+  const [libraryTab, setLibraryTab] = useState<LibraryTab>('discover');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedCategory, setSelectedCategory] = useState('All');
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
   const [prompts, setPrompts] = useState<PromptItem[]>([]);
   const [context, setContext] = useState<PageContext | null>(null);
   const [contextError, setContextError] = useState<string | null>(null);
@@ -166,12 +180,22 @@ export default function App() {
     }
   };
 
+  const showToast = useCallback((message: string) => {
+    setToastMessage(message);
+    setTimeout(() => {
+      setToastMessage((prev) => (prev === message ? null : prev));
+    }, 2600);
+  }, []);
+
   const handleRunPrompt = async (prompt: PromptItem) => {
+    if (runningPromptId !== null) return;
+
     const startTime = performance.now();
     runStartRef.current = startTime;
     setLiveElapsedMs(0);
     setRunningPromptId(prompt.id);
     setDownloadProgress(null);
+    setActiveView('results');
     targetTextRef.current = '';
     displayedLenRef.current = 0;
     setDisplayedText('');
@@ -267,9 +291,17 @@ export default function App() {
       nextList = sortPrompts([...prompts, updatedItem]);
     }
 
+    const isEditing = Boolean(editingPrompt);
     setPrompts(nextList);
     setShowCreateModal(false);
     setEditingPrompt(null);
+    if (!isEditing) {
+      setLibraryTab('my-prompts');
+      setSelectedCategory('All');
+      setSearchQuery('');
+      setActiveView('prompts');
+    }
+    showToast(isEditing ? 'Prompt updated' : 'Prompt saved to My Prompts');
     await saveLocalPrompts(nextList);
 
     if (user) {
@@ -282,6 +314,7 @@ export default function App() {
       .filter((item) => item.id !== promptId)
       .map((item, idx) => ({ ...item, order: idx }));
     setPrompts(nextList);
+    showToast('Prompt deleted');
     await saveLocalPrompts(nextList);
     if (user) {
       void deleteCloudPrompt(user.uid, promptId);
@@ -289,13 +322,50 @@ export default function App() {
   };
 
   const handleReorder = async (promptId: string, direction: 'up' | 'down') => {
-    const nextList = reorderPrompts(prompts, promptId, direction);
+    const builtInStored = prompts.filter(isBuiltInPrompt);
+    const customStored = prompts.filter((item) => !isBuiltInPrompt(item));
+    const reorderedCustom = reorderPrompts(customStored, promptId, direction);
+    const nextList = [...builtInStored, ...reorderedCustom].map((item, idx) => ({
+      ...item,
+      order: idx,
+    }));
     setPrompts(nextList);
     await saveLocalPrompts(nextList);
     if (user) {
       void saveAllCloudPrompts(user.uid, nextList);
     }
   };
+
+  const customPrompts = useMemo(
+    () => sortPrompts(prompts.filter((item) => !isBuiltInPrompt(item))),
+    [prompts],
+  );
+  const activeTabPrompts = libraryTab === 'discover' ? STARTER_PROMPTS : customPrompts;
+  const availableCategories = useMemo(() => {
+    const unique = new Set<string>();
+    for (const item of activeTabPrompts) {
+      if (item.category?.trim()) unique.add(item.category.trim());
+    }
+    return ['All', ...unique];
+  }, [activeTabPrompts]);
+
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const isFiltered = Boolean(normalizedQuery || selectedCategory !== 'All');
+  const filteredPrompts = useMemo(
+    () =>
+      activeTabPrompts.filter((item) => {
+        const matchesCategory =
+          selectedCategory === 'All' || item.category?.trim() === selectedCategory;
+        if (!matchesCategory) return false;
+        if (!normalizedQuery) return true;
+        return (
+          item.title.toLowerCase().includes(normalizedQuery) ||
+          item.instruction.toLowerCase().includes(normalizedQuery) ||
+          (item.category?.toLowerCase().includes(normalizedQuery) ?? false)
+        );
+      }),
+    [activeTabPrompts, normalizedQuery, selectedCategory],
+  );
 
   const displayedTokens = activePromptTokens ?? context?.tokens ?? 0;
   const tokenStatus = getTokenStatus(displayedTokens);
@@ -319,14 +389,16 @@ export default function App() {
       {/* Header */}
       <header className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2">
-          <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-gradient-to-br from-[#1D1D1F] to-[#0071E3] text-white shadow-xs">
-            <Sparkles className="h-4 w-4" />
-          </div>
+          <img
+            src="/icons/icon-48.png"
+            alt="Espresso logo"
+            className="h-8 w-8 rounded-xl bg-white object-contain p-0.5 shadow-xs ring-1 ring-black/6"
+          />
           <div>
             <h1 className="text-[15px] font-semibold leading-tight tracking-tight text-[#1D1D1F]">
               Espresso
             </h1>
-            <p className="text-[11px] text-neutral-500">Hybrid On-Device &amp; Cloud AI</p>
+            <p className="text-[11px] text-neutral-500">Your prompts, one click away</p>
           </div>
         </div>
 
@@ -335,12 +407,12 @@ export default function App() {
             type="button"
             onClick={() => void handleWarmUpLocalAi()}
             disabled={localAiStatus === 'warming'}
-            title="Warm up on-device Gemini Nano model"
+            title="Enable private on-device AI (Chrome Gemini Nano, falls back to Gemini Cloud when needed)"
             className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-[11px] font-medium transition ${
               localAiStatus === 'ready'
                 ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
                 : localAiStatus === 'fallback'
-                  ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200'
+                  ? 'bg-sky-50 text-sky-700 ring-1 ring-sky-200'
                   : 'bg-white text-[#1D1D1F] ring-1 ring-black/8 hover:bg-neutral-50'
             }`}
           >
@@ -348,19 +420,20 @@ export default function App() {
             <span>
               {localAiStatus === 'warming'
                 ? downloadProgress !== null
-                  ? `${Math.round(downloadProgress * 100)}%`
-                  : 'Warming...'
+                  ? `Preparing ${Math.round(downloadProgress * 100)}%`
+                  : 'Preparing...'
                 : localAiStatus === 'ready'
-                  ? 'Nano Ready'
+                  ? 'Private AI Ready'
                   : localAiStatus === 'fallback'
-                    ? 'Cloud Mode'
-                    : 'Warm Up Local AI'}
+                    ? 'Cloud AI Active'
+                    : 'Enable Private AI'}
             </span>
           </button>
 
           <button
             type="button"
             onClick={() => setShowAuthModal(true)}
+            aria-label={user ? `Cloud Sync: ${user.email}` : 'Cloud Sync'}
             title={user ? `Synced: ${user.email}` : 'Sign in for Cloud Sync'}
             className={`inline-flex h-7 w-7 items-center justify-center rounded-full ring-1 transition ${
               user
@@ -373,179 +446,386 @@ export default function App() {
         </div>
       </header>
 
+      {/* Primary View Switcher: Prompts | Results */}
+      <nav
+        aria-label="Main view"
+        className="grid grid-cols-2 rounded-xl bg-black/5 p-1"
+      >
+        <button
+          type="button"
+          onClick={() => setActiveView('prompts')}
+          className={`rounded-lg py-1.5 text-[12px] font-medium transition ${
+            activeView === 'prompts'
+              ? 'bg-white text-[#1D1D1F] shadow-xs'
+              : 'text-neutral-600 hover:text-[#1D1D1F]'
+          }`}
+        >
+          Prompts
+        </button>
+        <button
+          type="button"
+          onClick={() => setActiveView('results')}
+          className={`inline-flex items-center justify-center gap-1.5 rounded-lg py-1.5 text-[12px] font-medium transition ${
+            activeView === 'results'
+              ? 'bg-white text-[#1D1D1F] shadow-xs'
+              : 'text-neutral-600 hover:text-[#1D1D1F]'
+          }`}
+        >
+          <span>Results</span>
+          {outputState && (
+            <span
+              className={`h-1.5 w-1.5 rounded-full ${
+                isOutputStreaming
+                  ? 'animate-pulse bg-[#0071E3]'
+                  : outputState.error
+                    ? 'bg-red-500'
+                    : 'bg-emerald-500'
+              }`}
+            />
+          )}
+        </button>
+      </nav>
+
+      {toastMessage && (
+        <div
+          role="status"
+          className="flex items-center gap-2 rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[12px] font-medium text-emerald-800"
+        >
+          <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
+
       {!isFirebaseConfigured && (
         <div className="rounded-xl border border-amber-200 bg-amber-50/90 px-3 py-2 text-[11px] leading-relaxed text-amber-800">
-          Firebase is not configured yet. Add your <code className="font-mono">.env</code> keys and rebuild to enable Hybrid AI and Cloud Sync.
+          Firebase is not configured yet. Add your <code className="font-mono">.env</code> keys and rebuild to enable AI execution and Cloud Sync.
         </div>
       )}
 
-      {/* Smart Context Extraction & Live Token Meter */}
-      <section className="rounded-2xl border border-black/8 bg-white p-3.5 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
-        <div className="flex items-center justify-between gap-2">
-          <span
-            className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
-              context?.source === 'selection'
-                ? 'bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200'
-                : 'bg-[#F5F5F7] text-neutral-700 ring-1 ring-black/6'
-            }`}
-          >
-            {context?.source === 'selection' ? 'Context: Selected Text' : 'Context: Full Page'}
-          </span>
-
-          <button
-            type="button"
-            onClick={() => void refreshContext()}
-            disabled={refreshingContext}
-            className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium text-[#0071E3] transition hover:bg-[#0071E3]/8 disabled:opacity-50"
-          >
-            <RefreshCw className={`h-3 w-3 ${refreshingContext ? 'animate-spin' : ''}`} />
-            <span>Refresh Context</span>
-          </button>
-        </div>
-
-        <p className="mt-1.5 truncate text-[12px] font-medium text-[#1D1D1F]">
-          {context?.pageTitle ?? 'No active page text loaded'}
-        </p>
-
-        {contextError && (
-          <p className="mt-1.5 text-[11px] text-red-600">{contextError}</p>
-        )}
-
-        <div className="mt-2.5">
-          <div className="mb-1 flex items-center justify-between text-[11px]">
-            <span className="font-medium text-neutral-600">
-              ~{tokenStatus.tokens.toLocaleString()} / {NANO_TOKEN_LIMIT.toLocaleString()} tokens
-            </span>
-            <span
-              className={
-                tokenStatus.exceedsNano ? 'font-medium text-sky-700' : 'text-emerald-700'
-              }
-            >
-              {tokenStatus.exceedsNano ? 'Cloud Fallback (> 9,216)' : 'Fits Gemini Nano'}
-            </span>
-          </div>
-          <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#F5F5F7]">
-            <div
-              className={`h-full rounded-full transition-all duration-300 ${
-                tokenStatus.exceedsNano ? 'bg-sky-500' : 'bg-emerald-500'
-              }`}
-              style={{ width: `${tokenStatus.percent}%` }}
-            />
-          </div>
-        </div>
-      </section>
-
-      {/* Output Card */}
-      {outputState && (
-        <OutputCard
-          promptTitle={outputState.prompt.title}
-          isRunning={isOutputStreaming}
-          downloadProgress={downloadProgress}
-          outputText={displayedText}
-          inferenceSource={outputState.inferenceSource}
-          elapsedMs={outputState.elapsedMs ?? liveElapsedMs}
-          error={outputState.error}
-          onRegenerate={() => void handleRunPrompt(outputState.prompt)}
-          onClose={() => setOutputState(null)}
-        />
-      )}
-
-      {/* Prompt Library */}
-      <section className="flex flex-col gap-2">
-        <div className="flex items-center justify-between px-0.5">
-          <h2 className="text-[12px] font-semibold uppercase tracking-wider text-neutral-500">
-            Prompt Library
-          </h2>
-          <button
-            type="button"
-            onClick={() => setShowCreateModal(true)}
-            className="inline-flex items-center gap-1 rounded-full bg-[#1D1D1F] px-3 py-1 text-[11px] font-medium text-white transition hover:bg-black"
-          >
-            <Plus className="h-3.5 w-3.5" />
-            <span>New Prompt</span>
-          </button>
-        </div>
-
-        {prompts.length === 0 ? (
-          <div className="rounded-2xl border border-dashed border-black/12 bg-white/70 p-6 text-center text-[12px] text-neutral-500">
-            No saved prompts yet. Click <strong>New Prompt</strong> to create your first one.
-          </div>
+      {activeView === 'results' ? (
+        outputState ? (
+          <OutputCard
+            promptTitle={outputState.prompt.title}
+            pageTitle={context?.pageTitle}
+            isRunning={isOutputStreaming}
+            downloadProgress={downloadProgress}
+            outputText={displayedText}
+            inferenceSource={outputState.inferenceSource}
+            elapsedMs={outputState.elapsedMs ?? liveElapsedMs}
+            error={outputState.error}
+            onRegenerate={() => void handleRunPrompt(outputState.prompt)}
+            onBack={() => setActiveView('prompts')}
+          />
         ) : (
-          <div className="flex flex-col gap-2 pb-4">
-            {prompts.map((prompt, index) => (
-              <article
-                key={prompt.id}
-                className="group rounded-2xl border border-black/8 bg-white p-3 shadow-[0_1px_2px_rgba(0,0,0,0.03)] transition hover:border-black/14"
+          <section className="rounded-2xl border border-dashed border-black/12 bg-white/80 p-6 text-center">
+            <Sparkles className="mx-auto h-5 w-5 text-neutral-400" />
+            <p className="mt-2 text-[13px] font-medium text-[#1D1D1F]">No results yet</p>
+            <p className="mt-1 text-[11.5px] text-neutral-500">
+              Run any prompt on the current webpage to view its answer here.
+            </p>
+            <button
+              type="button"
+              onClick={() => setActiveView('prompts')}
+              className="mt-3 rounded-full bg-[#0071E3] px-4 py-1.5 text-[12px] font-medium text-white transition hover:bg-[#0077ED]"
+            >
+              Browse Prompts
+            </button>
+          </section>
+        )
+      ) : (
+        <>
+          {/* Webpage Context Card */}
+          <section className="rounded-2xl border border-black/8 bg-white p-3 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+            <div className="flex items-center justify-between gap-2">
+              <span
+                className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
+                  context?.source === 'selection'
+                    ? 'bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200'
+                    : 'bg-[#F5F5F7] text-neutral-700 ring-1 ring-black/6'
+                }`}
               >
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0 flex-1">
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      <h3 className="truncate text-[13px] font-semibold text-[#1D1D1F]">
-                        {prompt.title}
-                      </h3>
-                      {prompt.category && (
-                        <span className="rounded-full bg-[#F5F5F7] px-2 py-0.5 text-[10px] font-medium text-neutral-600">
-                          {prompt.category}
-                        </span>
-                      )}
+                <FileText className="h-3 w-3" />
+                <span>
+                  {context?.source === 'selection'
+                    ? 'Running on selected text'
+                    : 'Running on this page'}
+                </span>
+              </span>
+
+              <button
+                type="button"
+                onClick={() => void refreshContext()}
+                disabled={refreshingContext}
+                className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium text-[#0071E3] transition hover:bg-[#0071E3]/8 disabled:opacity-50"
+              >
+                <RefreshCw className={`h-3 w-3 ${refreshingContext ? 'animate-spin' : ''}`} />
+                <span>Refresh</span>
+              </button>
+            </div>
+
+            <p className="mt-1.5 truncate text-[12.5px] font-medium text-[#1D1D1F]">
+              {context?.pageTitle ?? 'Page content unavailable'}
+            </p>
+
+            {contextError ? (
+              <div className="mt-2 flex items-center justify-between gap-2 rounded-xl bg-amber-50 px-2.5 py-2 text-[11px] text-amber-800">
+                <span>{contextError}</span>
+                <button
+                  type="button"
+                  onClick={() => void refreshContext()}
+                  className="shrink-0 font-semibold text-amber-900 underline"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : (
+              <div className="mt-2">
+                <div className="mb-1 flex items-center justify-between text-[11px]">
+                  <span
+                    className={
+                      tokenStatus.exceedsNano
+                        ? 'font-medium text-sky-700'
+                        : 'font-medium text-emerald-700'
+                    }
+                  >
+                    {tokenStatus.exceedsNano
+                      ? 'Uses Cloud AI (long page)'
+                      : 'Private AI ready'}
+                  </span>
+                  <span
+                    title={`Approximate payload size (${tokenStatus.tokens.toLocaleString()} of ${NANO_TOKEN_LIMIT.toLocaleString()} local Gemini Nano tokens)`}
+                    className="tabular-nums text-neutral-400"
+                  >
+                    ~{tokenStatus.tokens.toLocaleString()} / {NANO_TOKEN_LIMIT.toLocaleString()} tokens
+                  </span>
+                </div>
+                <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#F5F5F7]">
+                  <div
+                    className={`h-full rounded-full transition-all duration-300 ${
+                      tokenStatus.exceedsNano ? 'bg-sky-500' : 'bg-emerald-500'
+                    }`}
+                    style={{ width: `${tokenStatus.percent}%` }}
+                  />
+                </div>
+              </div>
+            )}
+          </section>
+
+          {/* Prompt Library */}
+          <section className="flex flex-col gap-2">
+            <div className="flex items-center justify-between gap-2">
+              <div
+                role="tablist"
+                aria-label="Prompt library tabs"
+                className="inline-flex rounded-xl bg-black/5 p-0.5"
+              >
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={libraryTab === 'discover'}
+                  onClick={() => {
+                    setLibraryTab('discover');
+                    setSelectedCategory('All');
+                  }}
+                  className={`rounded-lg px-2.5 py-1 text-[11.5px] font-medium transition ${
+                    libraryTab === 'discover'
+                      ? 'bg-white text-[#1D1D1F] shadow-xs'
+                      : 'text-neutral-600 hover:text-[#1D1D1F]'
+                  }`}
+                >
+                  Discover
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={libraryTab === 'my-prompts'}
+                  onClick={() => {
+                    setLibraryTab('my-prompts');
+                    setSelectedCategory('All');
+                  }}
+                  className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11.5px] font-medium transition ${
+                    libraryTab === 'my-prompts'
+                      ? 'bg-white text-[#1D1D1F] shadow-xs'
+                      : 'text-neutral-600 hover:text-[#1D1D1F]'
+                  }`}
+                >
+                  <span>My Prompts</span>
+                  <span className="rounded-full bg-black/6 px-1.5 text-[10px] text-neutral-600">
+                    {customPrompts.length}
+                  </span>
+                </button>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setShowCreateModal(true)}
+                className="inline-flex items-center gap-1 rounded-full bg-[#1D1D1F] px-3 py-1.5 text-[11px] font-medium text-white transition hover:bg-black"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                <span>New Prompt</span>
+              </button>
+            </div>
+
+            {/* Search & Category Filters */}
+            <div className="space-y-1.5">
+              <div className="relative">
+                <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-neutral-400" />
+                <input
+                  type="search"
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  placeholder="Search prompts..."
+                  aria-label="Search prompts"
+                  className="w-full rounded-xl border border-black/8 bg-white py-1.5 pr-7 pl-8 text-[12px] text-[#1D1D1F] placeholder:text-neutral-400 outline-none transition focus:border-[#0071E3]"
+                />
+                {searchQuery && (
+                  <button
+                    type="button"
+                    onClick={() => setSearchQuery('')}
+                    aria-label="Clear search"
+                    className="absolute top-1/2 right-2 -translate-y-1/2 rounded-full p-0.5 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700"
+                  >
+                    <X className="h-3 w-3" />
+                  </button>
+                )}
+              </div>
+
+              {availableCategories.length > 1 && (
+                <div className="flex flex-wrap gap-1">
+                  {availableCategories.map((category) => (
+                    <button
+                      key={category}
+                      type="button"
+                      onClick={() => setSelectedCategory(category)}
+                      className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition ${
+                        selectedCategory === category
+                          ? 'bg-[#1D1D1F] text-white'
+                          : 'bg-white text-neutral-600 ring-1 ring-black/8 hover:bg-neutral-50'
+                      }`}
+                    >
+                      {category}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Prompt List / Empty States */}
+            {libraryTab === 'my-prompts' && customPrompts.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-black/12 bg-white/80 p-5 text-center">
+                <p className="text-[13px] font-medium text-[#1D1D1F]">No custom prompts yet</p>
+                <p className="mt-1 text-[11.5px] text-neutral-500">
+                  Save your favorite instructions to run them on any page in one click.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setShowCreateModal(true)}
+                  className="mt-3 inline-flex items-center gap-1 rounded-full bg-[#0071E3] px-3.5 py-1.5 text-[12px] font-medium text-white transition hover:bg-[#0077ED]"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  <span>Create Your First Prompt</span>
+                </button>
+              </div>
+            ) : filteredPrompts.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-black/12 bg-white/80 p-5 text-center">
+                <p className="text-[12.5px] font-medium text-[#1D1D1F]">
+                  No prompts match your filter
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSearchQuery('');
+                    setSelectedCategory('All');
+                  }}
+                  className="mt-2 text-[11.5px] font-medium text-[#0071E3] hover:underline"
+                >
+                  Clear filters
+                </button>
+              </div>
+            ) : (
+              <div className="flex flex-col gap-2 pb-4">
+                {filteredPrompts.map((prompt, index) => (
+                  <article
+                    key={prompt.id}
+                    className="group rounded-2xl border border-black/8 bg-white p-3 shadow-[0_1px_2px_rgba(0,0,0,0.03)] transition hover:border-black/14"
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <h3 className="truncate text-[13px] font-semibold text-[#1D1D1F]">
+                            {prompt.title}
+                          </h3>
+                          {prompt.category && (
+                            <span className="rounded-full bg-[#F5F5F7] px-2 py-0.5 text-[10px] font-medium text-neutral-600">
+                              {prompt.category}
+                            </span>
+                          )}
+                        </div>
+                        <p className="mt-1 line-clamp-2 text-[11.5px] leading-snug text-neutral-500">
+                          {prompt.instruction}
+                        </p>
+                      </div>
+
+                      <button
+                        type="button"
+                        disabled={runningPromptId !== null}
+                        onClick={() => void handleRunPrompt(prompt)}
+                        className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#0071E3] px-3 py-1.5 text-[12px] font-medium text-white transition hover:bg-[#0077ED] disabled:opacity-50"
+                      >
+                        <Play className="h-3 w-3 fill-current" />
+                        <span>{runningPromptId === prompt.id ? 'Running' : 'Run'}</span>
+                      </button>
                     </div>
-                    <p className="mt-1 line-clamp-2 text-[11.5px] leading-snug text-neutral-500">
-                      {prompt.instruction}
-                    </p>
-                  </div>
 
-                  <button
-                    type="button"
-                    disabled={runningPromptId !== null}
-                    onClick={() => void handleRunPrompt(prompt)}
-                    className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#0071E3] px-3 py-1.5 text-[12px] font-medium text-white transition hover:bg-[#0077ED] disabled:opacity-50"
-                  >
-                    <Play className="h-3 w-3 fill-current" />
-                    <span>{runningPromptId === prompt.id ? 'Running' : 'Run'}</span>
-                  </button>
-                </div>
-
-                <div className="mt-2 flex items-center justify-end gap-1 border-t border-black/5 pt-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                  <button
-                    type="button"
-                    disabled={index === 0}
-                    onClick={() => void handleReorder(prompt.id, 'up')}
-                    aria-label={`Move ${prompt.title} up`}
-                    className="rounded-md p-1 text-neutral-400 transition hover:bg-[#F5F5F7] hover:text-neutral-700 disabled:opacity-30"
-                  >
-                    <ArrowUp className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    disabled={index === prompts.length - 1}
-                    onClick={() => void handleReorder(prompt.id, 'down')}
-                    aria-label={`Move ${prompt.title} down`}
-                    className="rounded-md p-1 text-neutral-400 transition hover:bg-[#F5F5F7] hover:text-neutral-700 disabled:opacity-30"
-                  >
-                    <ArrowDown className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setEditingPrompt(prompt)}
-                    aria-label={`Edit ${prompt.title}`}
-                    className="rounded-md p-1 text-neutral-400 transition hover:bg-[#F5F5F7] hover:text-neutral-700"
-                  >
-                    <Pencil className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleDeletePrompt(prompt.id)}
-                    aria-label={`Delete ${prompt.title}`}
-                    className="rounded-md p-1 text-neutral-400 transition hover:bg-red-50 hover:text-red-600"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
-              </article>
-            ))}
-          </div>
-        )}
-      </section>
+                    {libraryTab === 'my-prompts' && (
+                      <div className="mt-2 flex items-center justify-end gap-1 border-t border-black/5 pt-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+                        {!isFiltered && (
+                          <>
+                            <button
+                              type="button"
+                              disabled={index === 0}
+                              onClick={() => void handleReorder(prompt.id, 'up')}
+                              aria-label={`Move ${prompt.title} up`}
+                              className="rounded-md p-1 text-neutral-400 transition hover:bg-[#F5F5F7] hover:text-neutral-700 disabled:opacity-30"
+                            >
+                              <ArrowUp className="h-3.5 w-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              disabled={index === filteredPrompts.length - 1}
+                              onClick={() => void handleReorder(prompt.id, 'down')}
+                              aria-label={`Move ${prompt.title} down`}
+                              className="rounded-md p-1 text-neutral-400 transition hover:bg-[#F5F5F7] hover:text-neutral-700 disabled:opacity-30"
+                            >
+                              <ArrowDown className="h-3.5 w-3.5" />
+                            </button>
+                          </>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => setEditingPrompt(prompt)}
+                          aria-label={`Edit ${prompt.title}`}
+                          className="rounded-md p-1 text-neutral-400 transition hover:bg-[#F5F5F7] hover:text-neutral-700"
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleDeletePrompt(prompt.id)}
+                          aria-label={`Delete ${prompt.title}`}
+                          className="rounded-md p-1 text-neutral-400 transition hover:bg-red-50 hover:text-red-600"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </article>
+                ))}
+              </div>
+            )}
+          </section>
+        </>
+      )}
 
       {(showCreateModal || editingPrompt) && (
         <PromptFormModal
