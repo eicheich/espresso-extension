@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
 import {
   ArrowDown,
@@ -59,6 +59,44 @@ export default function App() {
     inferenceSource: string | undefined;
     error: string | null;
   } | null>(null);
+
+  const targetTextRef = useRef('');
+  const displayedLenRef = useRef(0);
+  const [displayedText, setDisplayedText] = useState('');
+
+  useEffect(() => {
+    const target = outputState?.outputText ?? '';
+    targetTextRef.current = target;
+
+    if (!outputState || outputState.error || !target) {
+      displayedLenRef.current = 0;
+      setDisplayedText('');
+      return;
+    }
+
+    if (displayedLenRef.current >= target.length) {
+      return;
+    }
+
+    let rafId = 0;
+    const tick = () => {
+      const currentTarget = targetTextRef.current;
+      const prevLen = displayedLenRef.current;
+      if (prevLen >= currentTarget.length) {
+        return;
+      }
+      const step = Math.max(2, Math.ceil((currentTarget.length - prevLen) / 8));
+      const nextLen = Math.min(currentTarget.length, prevLen + step);
+      displayedLenRef.current = nextLen;
+      setDisplayedText(currentTarget.slice(0, nextLen));
+      if (nextLen < currentTarget.length) {
+        rafId = requestAnimationFrame(tick);
+      }
+    };
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [outputState?.outputText, outputState?.isRunning, outputState?.error]);
 
   const [editingPrompt, setEditingPrompt] = useState<PromptItem | null>(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
@@ -127,6 +165,9 @@ export default function App() {
   const handleRunPrompt = async (prompt: PromptItem) => {
     setRunningPromptId(prompt.id);
     setDownloadProgress(null);
+    targetTextRef.current = '';
+    displayedLenRef.current = 0;
+    setDisplayedText('');
     setOutputState({
       promptTitle: prompt.title,
       isRunning: true,
@@ -146,12 +187,23 @@ export default function App() {
       );
       setActivePromptTokens(combinedTokens);
 
-      const result = await runHybridPrompt(
-        prompt.instruction,
-        freshContext.text,
-        (progress) => setDownloadProgress(progress),
-      );
+      const result = await runHybridPrompt(prompt.instruction, freshContext.text, {
+        onProgress: (progress) => setDownloadProgress(progress),
+        onChunk: (accumulatedText, inferenceSource) => {
+          targetTextRef.current = accumulatedText;
+          setOutputState((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  outputText: accumulatedText,
+                  inferenceSource: inferenceSource ?? prev.inferenceSource,
+                }
+              : prev,
+          );
+        },
+      });
 
+      targetTextRef.current = result.text;
       setOutputState({
         promptTitle: prompt.title,
         isRunning: false,
@@ -236,6 +288,11 @@ export default function App() {
 
   const displayedTokens = activePromptTokens ?? context?.tokens ?? 0;
   const tokenStatus = getTokenStatus(displayedTokens);
+  const isOutputStreaming = Boolean(
+    outputState &&
+      !outputState.error &&
+      (outputState.isRunning || displayedText.length < outputState.outputText.length),
+  );
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-[420px] flex-col gap-3 px-3.5 py-3.5">
@@ -362,9 +419,9 @@ export default function App() {
       {outputState && (
         <OutputCard
           promptTitle={outputState.promptTitle}
-          isRunning={outputState.isRunning}
+          isRunning={isOutputStreaming}
           downloadProgress={downloadProgress}
-          outputText={outputState.outputText}
+          outputText={displayedText}
           inferenceSource={outputState.inferenceSource}
           error={outputState.error}
           onClose={() => setOutputState(null)}

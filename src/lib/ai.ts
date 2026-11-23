@@ -7,7 +7,12 @@ import {
 import { estimateTokens } from './context';
 import { ai } from './firebase';
 
-const CLOUD_FALLBACK_MODEL = 'gemini-2.5-flash';
+const CLOUD_FALLBACK_MODELS = [
+  'gemini-4-hydrogen',
+  'gemini-3.8-flash',
+  'gemini-3.5-flash-lite',
+] as const;
+const CLOUD_INITIAL_TIMEOUT_MS = 20_000;
 const SAFE_ON_DEVICE_TOKEN_LIMIT = 9000;
 
 export interface InferenceBadge {
@@ -20,8 +25,13 @@ export interface HybridPromptResult {
   inferenceSource: InferenceSource | string | undefined;
 }
 
+export interface RunHybridPromptOptions {
+  onProgress?: (progress: number) => void;
+  onChunk?: (accumulatedText: string, inferenceSource?: string) => void;
+}
+
 let cachedHybridModel: GenerativeModel | null = null;
-let cachedCloudModel: GenerativeModel | null = null;
+const cachedCloudModels = new Map<string, GenerativeModel>();
 
 function requireAI() {
   if (!ai) {
@@ -37,35 +47,41 @@ function getHybridModel(): GenerativeModel {
     cachedHybridModel = getGenerativeModel(requireAI(), {
       mode: InferenceMode.PREFER_ON_DEVICE,
       inCloudParams: {
-        model: CLOUD_FALLBACK_MODEL,
+        model: CLOUD_FALLBACK_MODELS[0],
       },
     });
   }
   return cachedHybridModel;
 }
 
-function getCloudFallbackModel(): GenerativeModel {
-  if (!cachedCloudModel) {
-    cachedCloudModel = getGenerativeModel(requireAI(), {
+function getCloudModel(modelName: string): GenerativeModel {
+  let model = cachedCloudModels.get(modelName);
+  if (!model) {
+    model = getGenerativeModel(requireAI(), {
       mode: InferenceMode.ONLY_IN_CLOUD,
       inCloudParams: {
-        model: CLOUD_FALLBACK_MODEL,
+        model: modelName,
       },
     });
+    cachedCloudModels.set(modelName, model);
   }
-  return cachedCloudModel;
+  return model;
+}
+
+function normalizeErrorText(error: unknown): string {
+  if (!error) return '';
+  if (typeof error === 'string') return error.toLowerCase();
+  const errObj = error as { name?: unknown; message?: unknown; status?: unknown; code?: unknown };
+  const name = error instanceof Error ? error.name : String(errObj.name ?? '');
+  const message = error instanceof Error ? error.message : String(errObj.message ?? '');
+  const status = errObj.status !== undefined ? String(errObj.status) : '';
+  const code = errObj.code !== undefined ? String(errObj.code) : '';
+  return `${name} ${status} ${code} ${message}`.toLowerCase();
 }
 
 export function isOnDeviceContextLimitError(error: unknown): boolean {
-  if (!error) return false;
-  const name = error instanceof Error ? error.name : String((error as { name?: unknown }).name ?? '');
-  const message =
-    error instanceof Error
-      ? error.message
-      : typeof error === 'string'
-        ? error
-        : String((error as { message?: unknown }).message ?? '');
-  const combined = `${name} ${message}`.toLowerCase();
+  const combined = normalizeErrorText(error);
+  if (!combined) return false;
 
   return (
     combined.includes('quotaexceedederror') ||
@@ -75,6 +91,37 @@ export function isOnDeviceContextLimitError(error: unknown): boolean {
     combined.includes('token limit') ||
     combined.includes('context length')
   );
+}
+
+export function isTransientCloudError(error: unknown): boolean {
+  const combined = normalizeErrorText(error);
+  if (!combined) return false;
+
+  return (
+    combined.includes('timed out') ||
+    combined.includes('timeout') ||
+    combined.includes('aborterror') ||
+    /\b(500|503)\b/.test(combined) ||
+    combined.includes('high demand') ||
+    combined.includes('overloaded') ||
+    combined.includes('service unavailable') ||
+    combined.includes('unavailable') ||
+    combined.includes('internal error')
+  );
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, modelName: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`Request to ${modelName} timed out after ${ms / 1000}s.`));
+    }, ms);
+  });
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 export function buildHybridPrompt(instruction: string, contextText: string): string {
@@ -108,48 +155,116 @@ export async function warmUpLocalModel(onProgress?: (progress: number) => void):
   await model.initializeDeviceModel(onProgress);
 }
 
-async function runCloudFallback(prompt: string): Promise<HybridPromptResult> {
-  const cloudResult = await getCloudFallbackModel().generateContent(prompt);
+async function consumeStream(
+  model: GenerativeModel,
+  prompt: string,
+  modelName: string,
+  forceCloudSource: boolean,
+  onChunk?: (accumulatedText: string, inferenceSource?: string) => void,
+): Promise<HybridPromptResult> {
+  const streamResult = await withTimeout(
+    model.generateContentStream(prompt),
+    CLOUD_INITIAL_TIMEOUT_MS,
+    modelName,
+  );
+  const iterator = streamResult.stream[Symbol.asyncIterator]();
+  let current = await withTimeout(iterator.next(), CLOUD_INITIAL_TIMEOUT_MS, modelName);
+
+  let accumulatedText = '';
+  let inferenceSource: InferenceSource | string | undefined = forceCloudSource
+    ? InferenceSource.IN_CLOUD
+    : undefined;
+
+  while (!current.done) {
+    const chunk = current.value;
+    if (!forceCloudSource && chunk.inferenceSource) {
+      inferenceSource = chunk.inferenceSource;
+    }
+    const delta = chunk.text();
+    if (delta) {
+      accumulatedText += delta;
+      onChunk?.(accumulatedText, inferenceSource);
+    }
+    current = await iterator.next();
+  }
+
+  const finalResponse = await streamResult.response;
+  if (!forceCloudSource && finalResponse.inferenceSource) {
+    inferenceSource = finalResponse.inferenceSource;
+  }
+
+  const finalText = accumulatedText || finalResponse.text();
+  if (!accumulatedText && finalText) {
+    onChunk?.(finalText, inferenceSource);
+  }
+
   return {
-    text: cloudResult.response.text(),
-    inferenceSource: InferenceSource.IN_CLOUD,
+    text: finalText,
+    inferenceSource,
   };
 }
 
+async function runCloudFallback(
+  prompt: string,
+  startIndex = 0,
+  onChunk?: (accumulatedText: string, inferenceSource?: string) => void,
+): Promise<HybridPromptResult> {
+  for (let i = startIndex; i < CLOUD_FALLBACK_MODELS.length; i++) {
+    const modelName = CLOUD_FALLBACK_MODELS[i];
+    try {
+      return await consumeStream(getCloudModel(modelName), prompt, modelName, true, onChunk);
+    } catch (err) {
+      const hasBackup = i + 1 < CLOUD_FALLBACK_MODELS.length;
+      if (hasBackup && isTransientCloudError(err)) {
+        console.warn(
+          `${modelName} unavailable (${err instanceof Error ? err.message : 'error'}); falling back to ${CLOUD_FALLBACK_MODELS[i + 1]}:`,
+          err,
+        );
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('All cloud fallback models failed.');
+}
+
 /**
- * Executes a prompt using hybrid inference inside a user click handler.
+ * Executes a prompt using streaming hybrid inference inside a user click handler.
  */
 export async function runHybridPrompt(
   instruction: string,
   contextText: string,
-  onProgress?: (progress: number) => void,
+  options?: RunHybridPromptOptions,
 ): Promise<HybridPromptResult> {
   const prompt = buildHybridPrompt(instruction, contextText);
 
   // Pre-check: skip on-device execution when payload exceeds safe Gemini Nano window.
   if (estimateTokens(prompt) > SAFE_ON_DEVICE_TOKEN_LIMIT) {
-    return runCloudFallback(prompt);
+    return runCloudFallback(prompt, 0, options?.onChunk);
   }
 
   const model = getHybridModel();
 
   // Trigger device model initialization inside user activation; if unavailable, continue to cloud fallback.
   try {
-    await model.initializeDeviceModel(onProgress);
+    await model.initializeDeviceModel(options?.onProgress);
   } catch (err) {
     console.warn('On-device model unavailable; continuing with cloud fallback:', err);
   }
 
   try {
-    const result = await model.generateContent(prompt);
-    return {
-      text: result.response.text(),
-      inferenceSource: result.response.inferenceSource,
-    };
+    return await consumeStream(model, prompt, CLOUD_FALLBACK_MODELS[0], false, options?.onChunk);
   } catch (err) {
     if (isOnDeviceContextLimitError(err)) {
       console.warn('On-device context limit exceeded; retrying via Gemini Cloud:', err);
-      return runCloudFallback(prompt);
+      return runCloudFallback(prompt, 0, options?.onChunk);
+    }
+    if (isTransientCloudError(err)) {
+      console.warn(
+        `${CLOUD_FALLBACK_MODELS[0]} timed out or hit transient 500/503; switching to ${CLOUD_FALLBACK_MODELS[1]}:`,
+        err,
+      );
+      return runCloudFallback(prompt, 1, options?.onChunk);
     }
     throw err;
   }

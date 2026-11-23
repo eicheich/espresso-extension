@@ -1,3 +1,5 @@
+import { Readability } from '@mozilla/readability';
+
 export const NANO_TOKEN_LIMIT = 9216;
 
 export type ContextSource = 'selection' | 'page';
@@ -50,6 +52,27 @@ export function getTokenStatus(tokens: number): TokenStatus {
   };
 }
 
+export function extractReadableArticle(html: string, fallbackText: string): string {
+  if (typeof DOMParser !== 'undefined' && html.trim()) {
+    try {
+      const parsed = new DOMParser().parseFromString(html, 'text/html');
+      const cloned = parsed.cloneNode(true) as Document;
+      const article = new Readability(cloned).parse();
+      const articleText = article?.textContent ? cleanPageText(article.textContent) : '';
+      if (articleText) {
+        const title = article?.title?.trim();
+        if (title && !articleText.startsWith(title)) {
+          return `${title}\n\n${articleText}`;
+        }
+        return articleText;
+      }
+    } catch {
+      // Fall back to cleaned innerText if Readability fails on malformed DOM.
+    }
+  }
+  return cleanPageText(fallbackText);
+}
+
 export async function extractActiveTabContext(): Promise<PageContext> {
   if (typeof chrome === 'undefined' || !chrome.tabs || !chrome.scripting) {
     throw new Error('Chrome extension APIs are unavailable outside the Chrome Side Panel.');
@@ -67,12 +90,16 @@ export async function extractActiveTabContext(): Promise<PageContext> {
 
   const results = await chrome.scripting.executeScript({
     target: { tabId: tab.id },
-    func: (): { source: ContextSource; rawText: string } => {
+    func: (): { source: ContextSource; html?: string; rawText: string } => {
       const selected = window.getSelection()?.toString().trim() ?? '';
       if (selected) {
         return { source: 'selection', rawText: selected };
       }
-      return { source: 'page', rawText: document.body?.innerText ?? '' };
+      return {
+        source: 'page',
+        html: document.documentElement?.outerHTML ?? '',
+        rawText: document.body?.innerText ?? '',
+      };
     },
   });
 
@@ -81,7 +108,11 @@ export async function extractActiveTabContext(): Promise<PageContext> {
     throw new Error('Could not extract text from the active webpage.');
   }
 
-  const text = cleanPageText(payload.rawText);
+  const text =
+    payload.source === 'selection'
+      ? cleanPageText(payload.rawText)
+      : extractReadableArticle(payload.html ?? '', payload.rawText);
+
   if (!text) {
     throw new Error('The active webpage appears to have no readable text.');
   }

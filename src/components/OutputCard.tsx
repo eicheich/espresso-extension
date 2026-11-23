@@ -38,7 +38,7 @@ export function OutputCard({
       <div className="mb-2.5 flex items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="truncate text-[13px] font-semibold text-[#1D1D1F]">{promptTitle}</p>
-          {badge && !isRunning && !error && (
+          {badge && !error && (
             <span
               className={`mt-1 inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
                 badge.kind === 'on-device'
@@ -60,7 +60,7 @@ export function OutputCard({
         </button>
       </div>
 
-      {isRunning && (
+      {isRunning && !outputText && (
         <div className="flex items-center gap-2.5 rounded-xl bg-[#F5F5F7] px-3 py-3 text-[12px] text-neutral-600">
           <Loader2 className="h-4 w-4 shrink-0 animate-spin text-[#0071E3]" />
           <span>
@@ -78,29 +78,39 @@ export function OutputCard({
         </div>
       )}
 
-      {!isRunning && !error && outputText && (
+      {!error && outputText && (
         <>
           <div className="markdown-output max-h-[340px] overflow-y-auto pr-1">
             <Markdown>{outputText}</Markdown>
           </div>
-          <div className="mt-3 flex justify-end border-t border-black/5 pt-2.5">
-            <button
-              type="button"
-              onClick={() => void handleCopy()}
-              className="inline-flex items-center gap-1.5 rounded-full bg-[#F5F5F7] px-3 py-1.5 text-[12px] font-medium text-[#1D1D1F] transition hover:bg-neutral-200/80"
-            >
-              {copied ? (
-                <>
-                  <Check className="h-3.5 w-3.5 text-emerald-600" />
-                  <span>Copied</span>
-                </>
-              ) : (
-                <>
-                  <Copy className="h-3.5 w-3.5 text-neutral-500" />
-                  <span>Copy Result</span>
-                </>
-              )}
-            </button>
+          <div className="mt-3 flex items-center justify-between border-t border-black/5 pt-2.5">
+            {isRunning ? (
+              <span className="inline-flex items-center gap-1.5 text-[11px] text-neutral-500">
+                <Loader2 className="h-3 w-3 animate-spin text-[#0071E3]" />
+                <span>Streaming...</span>
+              </span>
+            ) : (
+              <span />
+            )}
+            {!isRunning && (
+              <button
+                type="button"
+                onClick={() => void handleCopy()}
+                className="inline-flex items-center gap-1.5 rounded-full bg-[#F5F5F7] px-3 py-1.5 text-[12px] font-medium text-[#1D1D1F] transition hover:bg-neutral-200/80"
+              >
+                {copied ? (
+                  <>
+                    <Check className="h-3.5 w-3.5 text-emerald-600" />
+                    <span>Copied</span>
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3.5 w-3.5 text-neutral-500" />
+                    <span>Copy Result</span>
+                  </>
+                )}
+              </button>
+            )}
           </div>
         </>
       )}

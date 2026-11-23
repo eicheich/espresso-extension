@@ -1,6 +1,6 @@
 import { initializeApp, type FirebaseApp } from 'firebase/app';
 import { getAI, GoogleAIBackend, type AI } from 'firebase/ai';
-import { initializeAppCheck, ReCaptchaV3Provider, type AppCheck } from 'firebase/app-check';
+import { CustomProvider, initializeAppCheck, type AppCheck } from 'firebase/app-check';
 import { getAuth, type Auth } from 'firebase/auth';
 import { getFirestore, type Firestore } from 'firebase/firestore';
 
@@ -35,7 +35,12 @@ if (isFirebaseConfigured) {
       import.meta.env.VITE_APPCHECK_DEBUG_TOKEN || true;
 
     appCheck = initializeAppCheck(app, {
-      provider: new ReCaptchaV3Provider('dummy-site-key-for-debug'),
+      provider: new CustomProvider({
+        getToken: async () => ({
+          token: 'debug-placeholder-token',
+          expireTimeMillis: Date.now() + 60 * 60 * 1000,
+        }),
+      }),
       isTokenAutoRefreshEnabled: true,
     });
   }

@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { buildHybridPrompt, isOnDeviceContextLimitError, resolveInferenceBadge } from './ai';
-import { cleanPageText, estimateTokens, getTokenStatus, NANO_TOKEN_LIMIT } from './context';
+import {
+  buildHybridPrompt,
+  isOnDeviceContextLimitError,
+  isTransientCloudError,
+  resolveInferenceBadge,
+} from './ai';
+import {
+  cleanPageText,
+  estimateTokens,
+  extractReadableArticle,
+  getTokenStatus,
+  NANO_TOKEN_LIMIT,
+} from './context';
 import { reorderPrompts, STARTER_PROMPTS } from './prompts';
 
 describe('context helpers', () => {
@@ -20,6 +31,15 @@ describe('context helpers', () => {
     const over = getTokenStatus(NANO_TOKEN_LIMIT + 1);
     expect(over.exceedsNano).toBe(true);
     expect(over.percent).toBe(100);
+  });
+
+  it('falls back cleanly to cleaned innerText when DOMParser is unavailable or HTML is empty', () => {
+    expect(extractReadableArticle('', '  Fallback   body \n\n\n text  ')).toBe(
+      'Fallback body\n\ntext',
+    );
+    expect(extractReadableArticle('<article><p>Body</p></article>', 'Clean fallback  text')).toBe(
+      'Clean fallback text',
+    );
   });
 });
 
@@ -60,5 +80,15 @@ describe('hybrid AI helpers', () => {
     expect(isOnDeviceContextLimitError(new Error('Token limit reached'))).toBe(true);
     expect(isOnDeviceContextLimitError(new Error('Network request failed'))).toBe(false);
     expect(isOnDeviceContextLimitError(null)).toBe(false);
+  });
+
+  it('detects timeouts and transient 500/503 errors while ignoring non-transient errors', () => {
+    expect(isTransientCloudError(new Error('HTTP 503 Service Unavailable: high demand'))).toBe(true);
+    expect(isTransientCloudError(new Error('500 Internal error encountered'))).toBe(true);
+    expect(isTransientCloudError({ status: 503, message: 'overloaded' })).toBe(true);
+    expect(isTransientCloudError(new Error('Request to gemini-4-hydrogen timed out after 20s.'))).toBe(true);
+    expect(isTransientCloudError(new Error('400 Invalid API key'))).toBe(false);
+    expect(isTransientCloudError(new Error('Permission denied'))).toBe(false);
+    expect(isTransientCloudError(null)).toBe(false);
   });
 });

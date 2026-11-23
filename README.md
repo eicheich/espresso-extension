@@ -9,10 +9,10 @@
 - **Chrome Side Panel UX (`~360px–400px`):** Opens directly from the extension toolbar icon (`chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true })`) and stays docked beside any webpage.
 - **Smart Context Extraction & Live Token Meter:**
   - Automatically prioritizes highlighted text (`window.getSelection()`) and labels it **`Context: Selected Text`**.
-  - Falls back to cleaned readable page text (`document.body.innerText`) labeled **`Context: Full Page`**.
+  - Falls back to clean article extraction using **`@mozilla/readability`** (with cleaned `document.body.innerText` fallback) labeled **`Context: Full Page`**, stripping navigation, ads, and boilerplate.
   - Displays a live approximate token meter (`~X / 9,216 tokens`) before and during execution so users see at a glance whether the payload fits within Gemini Nano's local window or will trigger Cloud Fallback.
-- **Hybrid Inference (`firebase/ai`):**
-  - Uses `InferenceMode.PREFER_ON_DEVICE` with `GoogleAIBackend()` and a `gemini-2.5-flash` cloud fallback.
+- **Streaming Hybrid Inference (`firebase/ai`):**
+  - Uses `generateContentStream` with `InferenceMode.PREFER_ON_DEVICE`, `GoogleAIBackend()`, and a flagship cloud fallback chain (`gemini-4-hydrogen` → `gemini-3.8-flash` → `gemini-3.5-flash-lite`) for resilient real-time Markdown streaming.
   - Respects Chrome's **User Activation Rule**: `model.initializeDeviceModel()` is called *only* inside explicit user click handlers (**Run** or **Warm Up Local AI**), never on page load.
   - Renders a transparent **Inference Source Badge** on every result:
     - `⚡ On-Device (Gemini Nano 4 • Private)` when executed locally (`on_device`)
@@ -28,7 +28,7 @@
     [Live Token Meter (~X / 9,216)]
                │
                ▼  (User clicks "Run" or "Warm Up Local AI")
-  model.initializeDeviceModel() + generateContent()
+  model.initializeDeviceModel() + generateContentStream()
         ┌──────┴─────────────────────────┐
         ▼                                ▼
   Local Gemini Nano Ready?         Unavailable or > Window
