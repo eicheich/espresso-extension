@@ -63,12 +63,24 @@ export function capArticleLength(text: string, maxChars = MAX_ARTICLE_CHARS): st
   return sliced.trim();
 }
 
+export function sanitizeHtmlForReadability(html: string): string {
+  return html
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, '')
+    .replace(/<noscript\b[^>]*>[\s\S]*?<\/noscript>/gi, '')
+    .replace(/<iframe\b[^>]*>[\s\S]*?<\/iframe>/gi, '')
+    .replace(/<object\b[^>]*>[\s\S]*?<\/object>/gi, '')
+    .replace(/<embed\b[^>]*\/?>/gi, '')
+    .replace(/\s+on[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s+(?:href|src)\s*=\s*(?:"\s*javascript:[^"]*"|'\s*javascript:[^']*'|javascript:[^\s>]+)/gi, '');
+}
+
 export function extractReadableArticle(html: string, fallbackText: string): string {
   if (typeof DOMParser !== 'undefined' && html.trim()) {
     try {
-      const parsed = new DOMParser().parseFromString(html, 'text/html');
+      const sanitizedHtml = sanitizeHtmlForReadability(html);
+      const parsed = new DOMParser().parseFromString(sanitizedHtml, 'text/html');
       const cloned = parsed.cloneNode(true) as Document;
-      const article = new Readability(cloned).parse();
+      const article = new Readability(cloned, { disableJSONLD: true }).parse();
       const articleText = article?.textContent ? cleanPageText(article.textContent) : '';
       if (articleText) {
         const title = article?.title?.trim();
@@ -106,10 +118,29 @@ export async function extractActiveTabContext(): Promise<PageContext> {
       if (selected) {
         return { source: 'selection', rawText: selected };
       }
+      const rawText = document.body?.innerText ?? '';
+      const rootClone = document.documentElement?.cloneNode(true) as HTMLElement | undefined;
+      if (!rootClone) {
+        return { source: 'page', html: '', rawText };
+      }
+      rootClone
+        .querySelectorAll('script, noscript, iframe, object, embed')
+        .forEach((node) => node.remove());
+      rootClone.querySelectorAll('*').forEach((el) => {
+        for (const attr of Array.from(el.attributes)) {
+          const name = attr.name.toLowerCase();
+          if (
+            name.startsWith('on') ||
+            ((name === 'href' || name === 'src') && attr.value.trim().toLowerCase().startsWith('javascript:'))
+          ) {
+            el.removeAttribute(attr.name);
+          }
+        }
+      });
       return {
         source: 'page',
-        html: document.documentElement?.outerHTML ?? '',
-        rawText: document.body?.innerText ?? '',
+        html: rootClone.outerHTML,
+        rawText,
       };
     },
   });

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildHybridPrompt,
   isOnDeviceContextLimitError,
+  isStreamParseError,
   isTransientCloudError,
   resolveInferenceBadge,
 } from './ai';
@@ -13,6 +14,7 @@ import {
   getTokenStatus,
   MAX_ARTICLE_CHARS,
   NANO_TOKEN_LIMIT,
+  sanitizeHtmlForReadability,
 } from './context';
 import { reorderPrompts, STARTER_PROMPTS } from './prompts';
 
@@ -52,6 +54,22 @@ describe('context helpers', () => {
     const capped = capArticleLength(longText);
     expect(capped.length).toBeLessThanOrEqual(MAX_ARTICLE_CHARS);
     expect(capped.endsWith('.')).toBe(true);
+  });
+
+  it('strips inline event handlers, scripts, noscripts, and javascript URLs from HTML', () => {
+    const dirty =
+      '<html><body><script>alert(1)</script><noscript><img src=x onerror=alert(2)></noscript>' +
+      '<img src="pic.jpg" onload="init()" onerror=\'bad()\'>' +
+      '<a href="javascript:void(0)" onclick="track()">Click</a>' +
+      '<article><p>Clean article content.</p></article></body></html>';
+    const cleaned = sanitizeHtmlForReadability(dirty);
+    expect(cleaned).not.toMatch(/<script/i);
+    expect(cleaned).not.toMatch(/<noscript/i);
+    expect(cleaned).not.toMatch(/\sonerror\s*=/i);
+    expect(cleaned).not.toMatch(/\sonload\s*=/i);
+    expect(cleaned).not.toMatch(/\sonclick\s*=/i);
+    expect(cleaned).not.toMatch(/javascript:/i);
+    expect(cleaned).toContain('Clean article content.');
   });
 });
 
@@ -99,6 +117,10 @@ describe('hybrid AI helpers', () => {
     expect(isTransientCloudError(new Error('500 Internal error encountered'))).toBe(true);
     expect(isTransientCloudError({ status: 503, message: 'overloaded' })).toBe(true);
     expect(isTransientCloudError(new Error('Request to gemini-3.5-flash-lite timed out after 8s.'))).toBe(true);
+    expect(isStreamParseError(new Error('Failed to parse stream (AI/parse-failed)'))).toBe(true);
+    expect(isTransientCloudError(new Error('Failed to parse stream (AI/parse-failed)'))).toBe(true);
+    expect(isTransientCloudError(new Error('HTTP 429: Quota exceeded for free tier'))).toBe(true);
+    expect(isTransientCloudError({ status: 429, message: 'RESOURCE_EXHAUSTED: rate limit' })).toBe(true);
     expect(isTransientCloudError(new Error('400 Invalid API key'))).toBe(false);
     expect(isTransientCloudError(new Error('Permission denied'))).toBe(false);
     expect(isTransientCloudError(null)).toBe(false);

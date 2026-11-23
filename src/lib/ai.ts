@@ -107,15 +107,30 @@ export function isOnDeviceContextLimitError(error: unknown): boolean {
   );
 }
 
+export function isStreamParseError(error: unknown): boolean {
+  const combined = normalizeErrorText(error);
+  if (!combined) return false;
+
+  return (
+    combined.includes('parse-failed') ||
+    combined.includes('failed to parse stream') ||
+    combined.includes('error parsing json response')
+  );
+}
+
 export function isTransientCloudError(error: unknown): boolean {
   const combined = normalizeErrorText(error);
   if (!combined) return false;
 
   return (
+    isStreamParseError(error) ||
     combined.includes('timed out') ||
     combined.includes('timeout') ||
     combined.includes('aborterror') ||
-    /\b(500|503)\b/.test(combined) ||
+    /\b(429|500|503)\b/.test(combined) ||
+    combined.includes('quota') ||
+    combined.includes('rate limit') ||
+    combined.includes('resource_exhausted') ||
     combined.includes('high demand') ||
     combined.includes('overloaded') ||
     combined.includes('service unavailable') ||
@@ -179,30 +194,39 @@ async function consumeStream(
   forceCloudSource: boolean,
   onChunk?: (accumulatedText: string, inferenceSource?: string) => void,
 ): Promise<HybridPromptResult> {
-  const streamResult = await withTimeout(
-    model.generateContentStream(prompt),
-    CLOUD_INITIAL_TIMEOUT_MS,
-    modelName,
+  const rawStreamPromise = model.generateContentStream(prompt);
+  // Pre-attach rejection handlers so timed-out/aborted SDK streams never trigger unhandled rejections.
+  void rawStreamPromise.then(
+    (sr) => sr.response.catch(() => undefined),
+    () => undefined,
   );
-  const iterator = streamResult.stream[Symbol.asyncIterator]();
-  let current = await withTimeout(iterator.next(), CLOUD_INITIAL_TIMEOUT_MS, modelName);
 
+  const streamResult = await withTimeout(rawStreamPromise, CLOUD_INITIAL_TIMEOUT_MS, modelName);
+  void streamResult.response.catch(() => undefined);
+
+  const iterator = streamResult.stream[Symbol.asyncIterator]();
   let accumulatedText = '';
   let inferenceSource: InferenceSource | string | undefined = forceCloudSource
     ? InferenceSource.IN_CLOUD
     : undefined;
 
-  while (!current.done) {
-    const chunk = current.value;
-    if (!forceCloudSource && chunk.inferenceSource) {
-      inferenceSource = chunk.inferenceSource;
+  try {
+    let current = await withTimeout(iterator.next(), CLOUD_INITIAL_TIMEOUT_MS, modelName);
+    while (!current.done) {
+      const chunk = current.value;
+      if (!forceCloudSource && chunk.inferenceSource) {
+        inferenceSource = chunk.inferenceSource;
+      }
+      const delta = chunk.text();
+      if (delta) {
+        accumulatedText += delta;
+        onChunk?.(accumulatedText, inferenceSource);
+      }
+      current = await iterator.next();
     }
-    const delta = chunk.text();
-    if (delta) {
-      accumulatedText += delta;
-      onChunk?.(accumulatedText, inferenceSource);
-    }
-    current = await iterator.next();
+  } catch (err) {
+    void iterator.return?.(undefined).catch(() => undefined);
+    throw err;
   }
 
   const finalResponse = await streamResult.response;
@@ -226,11 +250,13 @@ async function runCloudFallback(
   startIndex = 0,
   onChunk?: (accumulatedText: string, inferenceSource?: string) => void,
 ): Promise<HybridPromptResult> {
+  let lastError: unknown;
   for (let i = startIndex; i < CLOUD_FALLBACK_MODELS.length; i++) {
     const modelName = CLOUD_FALLBACK_MODELS[i];
     try {
       return await consumeStream(getCloudModel(modelName), prompt, modelName, true, onChunk);
     } catch (err) {
+      lastError = err;
       const hasBackup = i + 1 < CLOUD_FALLBACK_MODELS.length;
       if (hasBackup && isTransientCloudError(err)) {
         console.warn(
@@ -239,10 +265,31 @@ async function runCloudFallback(
         );
         continue;
       }
+      if (!hasBackup && isStreamParseError(err)) {
+        break;
+      }
       throw err;
     }
   }
-  throw new Error('All cloud fallback models failed.');
+
+  // Last-resort non-streaming cloud call when SSE framing fails across streaming attempts.
+  if (isStreamParseError(lastError)) {
+    const fallbackName = CLOUD_FALLBACK_MODELS[0];
+    console.warn(`Cloud streaming parse failed; retrying non-streaming request on ${fallbackName}.`);
+    const result = await withTimeout(
+      getCloudModel(fallbackName).generateContent(prompt),
+      CLOUD_INITIAL_TIMEOUT_MS,
+      fallbackName,
+    );
+    const text = result.response.text();
+    onChunk?.(text, InferenceSource.IN_CLOUD);
+    return {
+      text,
+      inferenceSource: InferenceSource.IN_CLOUD,
+    };
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('All cloud fallback models failed.');
 }
 
 /**
