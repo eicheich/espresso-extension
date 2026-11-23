@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildHybridPrompt, resolveInferenceBadge } from './ai';
+import { buildHybridPrompt, isOnDeviceContextLimitError, resolveInferenceBadge } from './ai';
 import { cleanPageText, estimateTokens, getTokenStatus, NANO_TOKEN_LIMIT } from './context';
 import { reorderPrompts, STARTER_PROMPTS } from './prompts';
 
@@ -49,5 +49,16 @@ describe('hybrid AI helpers', () => {
     expect(resolveInferenceBadge('IN_DEVICE').kind).toBe('on-device');
     expect(resolveInferenceBadge('in_cloud').label).toBe('☁️ Cloud Fallback (Gemini Cloud)');
     expect(resolveInferenceBadge(undefined).kind).toBe('cloud');
+  });
+
+  it('detects on-device context limit errors and ignores unrelated errors', () => {
+    expect(isOnDeviceContextLimitError(new Error('The input is too large'))).toBe(true);
+    const quotaErr = new Error('Input exceeds model quota');
+    quotaErr.name = 'QuotaExceededError';
+    expect(isOnDeviceContextLimitError(quotaErr)).toBe(true);
+    expect(isOnDeviceContextLimitError(new Error('Exceeds context window limit'))).toBe(true);
+    expect(isOnDeviceContextLimitError(new Error('Token limit reached'))).toBe(true);
+    expect(isOnDeviceContextLimitError(new Error('Network request failed'))).toBe(false);
+    expect(isOnDeviceContextLimitError(null)).toBe(false);
   });
 });

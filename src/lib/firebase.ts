@@ -29,14 +29,16 @@ let ai: AI | null = null;
 if (isFirebaseConfigured) {
   app = initializeApp(firebaseConfig);
 
-  // Enable App Check debug token mode before initialization so chrome-extension:// works without a live reCAPTCHA site key.
-  (self as unknown as { FIREBASE_APPCHECK_DEBUG_TOKEN?: string | boolean }).FIREBASE_APPCHECK_DEBUG_TOKEN =
-    import.meta.env.VITE_APPCHECK_DEBUG_TOKEN || true;
+  if (typeof self !== 'undefined') {
+    // Enable App Check debug token mode before initialization so chrome-extension:// works without a live reCAPTCHA site key.
+    (self as unknown as { FIREBASE_APPCHECK_DEBUG_TOKEN?: string | boolean }).FIREBASE_APPCHECK_DEBUG_TOKEN =
+      import.meta.env.VITE_APPCHECK_DEBUG_TOKEN || true;
 
-  appCheck = initializeAppCheck(app, {
-    provider: new ReCaptchaV3Provider('dummy-site-key-for-debug'),
-    isTokenAutoRefreshEnabled: true,
-  });
+    appCheck = initializeAppCheck(app, {
+      provider: new ReCaptchaV3Provider('dummy-site-key-for-debug'),
+      isTokenAutoRefreshEnabled: true,
+    });
+  }
 
   auth = getAuth(app);
   db = getFirestore(app);
