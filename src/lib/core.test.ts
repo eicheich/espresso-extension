@@ -16,11 +16,13 @@ import {
   estimateTokens,
   extractReadableArticle,
   getTokenStatus,
+  isPdfUrl,
   MAX_ARTICLE_CHARS,
   NANO_TOKEN_LIMIT,
   sanitizeHtmlForReadability,
 } from './context';
 import { reorderPrompts, STARTER_PROMPTS } from './prompts';
+import { formatCompactTokens, formatUsageFooter } from './storage';
 
 describe('context helpers', () => {
   it('cleans excessive whitespace while preserving paragraphs', () => {
@@ -154,5 +156,34 @@ describe('hybrid AI helpers', () => {
     expect(err.message).not.toMatch(/AI\/fetch-error/i);
     expect(err.message).not.toMatch(/[\{\}]/);
     expect(err.message).toContain('Warm Up Local AI');
+  });
+});
+
+describe('file/pdf and local usage helpers', () => {
+  it('detects PDF URLs accurately regardless of query string', () => {
+    expect(isPdfUrl('file:///C:/Users/doc/report.PDF?page=2')).toBe(true);
+    expect(isPdfUrl('https://example.com/paper.pdf#section')).toBe(true);
+    expect(isPdfUrl('https://example.com/article.html')).toBe(false);
+  });
+
+  it('formats privacy-safe local usage footer and token counts', () => {
+    expect(formatCompactTokens(850)).toBe('850');
+    expect(formatCompactTokens(18400)).toBe('18.4k');
+    expect(
+      formatUsageFooter({
+        totalShots: 0,
+        onDeviceShots: 0,
+        cloudShots: 0,
+        tokensSavedOnDevice: 0,
+      }),
+    ).toBe('');
+    expect(
+      formatUsageFooter({
+        totalShots: 12,
+        onDeviceShots: 9,
+        cloudShots: 3,
+        tokensSavedOnDevice: 18400,
+      }),
+    ).toBe('☕ 12 shots • ⚡ 75% local (~18.4k tokens saved)');
   });
 });

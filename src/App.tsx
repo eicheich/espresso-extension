@@ -4,9 +4,10 @@ import {
   ArrowDown,
   ArrowUp,
   CheckCircle2,
-  Cloud,
   Cpu,
+  ExternalLink,
   FileText,
+  FolderLock,
   Pencil,
   Play,
   Plus,
@@ -14,20 +15,24 @@ import {
   Search,
   Sparkles,
   Trash2,
+  User as UserIcon,
   X,
 } from 'lucide-react';
 import { isFirebaseConfigured } from './lib/firebase';
 import {
   buildHybridPrompt,
   LocalAiWarmupRequiredError,
+  resolveInferenceBadge,
   runHybridPrompt,
   warmUpLocalModel,
 } from './lib/ai';
 import {
+  ContextExtractionError,
   estimateTokens,
   extractActiveTabContext,
   getTokenStatus,
   NANO_TOKEN_LIMIT,
+  type ContextErrorCode,
   type PageContext,
 } from './lib/context';
 import {
@@ -39,6 +44,12 @@ import {
   STARTER_PROMPTS,
   type PromptItem,
 } from './lib/prompts';
+import {
+  formatUsageFooter,
+  loadUsageStats,
+  recordUsageShot,
+  type UsageStats,
+} from './lib/storage';
 import {
   deleteCloudPrompt,
   saveAllCloudPrompts,
@@ -62,8 +73,10 @@ export default function App() {
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const [prompts, setPrompts] = useState<PromptItem[]>([]);
+  const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
   const [context, setContext] = useState<PageContext | null>(null);
   const [contextError, setContextError] = useState<string | null>(null);
+  const [contextErrorCode, setContextErrorCode] = useState<ContextErrorCode | null>(null);
   const [refreshingContext, setRefreshingContext] = useState(false);
 
   const [activePromptTokens, setActivePromptTokens] = useState<number | null>(null);
@@ -133,6 +146,7 @@ export default function App() {
   const refreshContext = useCallback(async (): Promise<PageContext | null> => {
     setRefreshingContext(true);
     setContextError(null);
+    setContextErrorCode(null);
     try {
       const next = await extractActiveTabContext();
       setContext(next);
@@ -140,14 +154,22 @@ export default function App() {
     } catch (err) {
       setContext(null);
       setContextError(err instanceof Error ? err.message : 'Unable to read active webpage.');
+      setContextErrorCode(err instanceof ContextExtractionError ? err.code : 'UNAVAILABLE');
       return null;
     } finally {
       setRefreshingContext(false);
     }
   }, []);
 
+  const handleOpenExtensionSettings = () => {
+    if (typeof chrome !== 'undefined' && chrome.tabs?.create && chrome.runtime?.id) {
+      void chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` });
+    }
+  };
+
   useEffect(() => {
     void loadLocalPrompts().then(setPrompts);
+    void loadUsageStats().then(setUsageStats);
     void refreshContext();
   }, [refreshContext]);
 
@@ -245,6 +267,9 @@ export default function App() {
       });
 
       const finalElapsedMs = performance.now() - startTime;
+      const isOnDevice = resolveInferenceBadge(result.inferenceSource).kind === 'on-device';
+      void recordUsageShot(isOnDevice, combinedTokens).then(setUsageStats);
+
       targetTextRef.current = result.text;
       setOutputState({
         prompt,
@@ -446,15 +471,30 @@ export default function App() {
           <button
             type="button"
             onClick={() => setShowAuthModal(true)}
-            aria-label={user ? `Cloud Sync: ${user.email}` : 'Cloud Sync'}
-            title={user ? `Synced: ${user.email}` : 'Sign in for Cloud Sync'}
-            className={`inline-flex h-7 w-7 items-center justify-center rounded-full ring-1 transition ${
+            aria-label={user ? `Account & Prompt Sync: ${user.email}` : 'Sign in for Prompt Sync'}
+            title={user ? `Synced: ${user.email}` : 'Account & Prompt Sync'}
+            className={`inline-flex items-center gap-1.5 rounded-full text-[11px] font-medium ring-1 transition ${
               user
-                ? 'bg-[#0071E3]/10 text-[#0071E3] ring-[#0071E3]/30'
-                : 'bg-white text-neutral-600 ring-black/8 hover:bg-neutral-50'
+                ? 'relative h-7 w-7 justify-center bg-[#0071E3]/10 text-[#0071E3] ring-[#0071E3]/30'
+                : 'bg-white px-2.5 py-1.5 text-[#1D1D1F] ring-black/8 hover:bg-neutral-50'
             }`}
           >
-            <Cloud className="h-3.5 w-3.5" />
+            {user ? (
+              <>
+                <span className="text-[11px] font-semibold uppercase">
+                  {(user.email?.[0] ?? 'U').toUpperCase()}
+                </span>
+                <span
+                  aria-hidden="true"
+                  className="absolute -top-0.5 -right-0.5 h-2 w-2 rounded-full bg-emerald-500 ring-2 ring-[#F5F5F7]"
+                />
+              </>
+            ) : (
+              <>
+                <UserIcon className="h-3.5 w-3.5 text-neutral-600" />
+                <span>Sign in</span>
+              </>
+            )}
           </button>
         </div>
       </header>
@@ -581,10 +621,46 @@ export default function App() {
             </div>
 
             <p className="mt-1.5 truncate text-[12.5px] font-medium text-[#1D1D1F]">
-              {context?.pageTitle ?? 'Page content unavailable'}
+              {context?.pageTitle ??
+                (contextErrorCode === 'FILE_ACCESS_REQUIRED'
+                  ? 'Local file permission needed'
+                  : 'Page content unavailable')}
             </p>
 
-            {contextError ? (
+            {contextErrorCode === 'FILE_ACCESS_REQUIRED' ? (
+              <div className="mt-2 space-y-2 rounded-xl border border-amber-200 bg-amber-50/80 p-2.5 text-[11px] text-amber-900">
+                <div className="flex items-start gap-2">
+                  <FolderLock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-700" />
+                  <div className="space-y-1">
+                    <p className="font-semibold">Allow access to local files (file://)</p>
+                    <ol className="list-decimal space-y-0.5 pl-4 text-amber-800">
+                      <li>Click Open Extension Settings</li>
+                      <li>Toggle on &ldquo;Allow access to file URLs&rdquo;</li>
+                      <li>Return here and click Refresh</li>
+                    </ol>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleOpenExtensionSettings}
+                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-full bg-[#1D1D1F] px-3 py-1.5 text-[11.5px] font-medium text-white transition hover:bg-black"
+                >
+                  <span>Open Extension Settings</span>
+                  <ExternalLink className="h-3 w-3" />
+                </button>
+              </div>
+            ) : contextErrorCode === 'PDF_ISOLATED' && contextError ? (
+              <div className="mt-2 flex items-start justify-between gap-2 rounded-xl border border-sky-200/80 bg-sky-50/70 px-2.5 py-2 text-[11px] leading-snug text-sky-900">
+                <span>{contextError}</span>
+                <button
+                  type="button"
+                  onClick={() => void refreshContext()}
+                  className="shrink-0 font-semibold text-sky-800 underline"
+                >
+                  Refresh
+                </button>
+              </div>
+            ) : contextError ? (
               <div className="mt-2 flex items-center justify-between gap-2 rounded-xl bg-amber-50 px-2.5 py-2 text-[11px] text-amber-800">
                 <span>{contextError}</span>
                 <button
@@ -727,6 +803,18 @@ export default function App() {
               )}
             </div>
 
+            {/* Account Sync nudge inside My Prompts when signed out */}
+            {libraryTab === 'my-prompts' && !user && isFirebaseConfigured && (
+              <button
+                type="button"
+                onClick={() => setShowAuthModal(true)}
+                className="flex w-full items-center justify-between rounded-xl border border-black/6 bg-white/80 px-3 py-2 text-left text-[11px] text-neutral-600 transition hover:border-[#0071E3]/30 hover:text-[#0071E3]"
+              >
+                <span>Sign in to back up &amp; sync your custom prompts across devices</span>
+                <UserIcon className="h-3.5 w-3.5 shrink-0" />
+              </button>
+            )}
+
             {/* Prompt List / Empty States */}
             {libraryTab === 'my-prompts' && customPrompts.length === 0 ? (
               <div className="rounded-2xl border border-dashed border-black/12 bg-white/80 p-5 text-center">
@@ -842,6 +930,12 @@ export default function App() {
             )}
           </section>
         </>
+      )}
+
+      {usageStats && usageStats.totalShots > 0 && (
+        <footer className="mt-auto border-t border-black/5 pt-2.5 pb-1 text-center text-[11px] text-neutral-500">
+          {formatUsageFooter(usageStats)}
+        </footer>
       )}
 
       {(showCreateModal || editingPrompt) && (

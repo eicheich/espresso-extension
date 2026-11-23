@@ -4,6 +4,22 @@ export const NANO_TOKEN_LIMIT = 9216;
 export const MAX_ARTICLE_CHARS = 15_000;
 
 export type ContextSource = 'selection' | 'page';
+export type ContextErrorCode = 'FILE_ACCESS_REQUIRED' | 'PDF_ISOLATED' | 'UNAVAILABLE';
+
+export class ContextExtractionError extends Error {
+  readonly code: ContextErrorCode;
+
+  constructor(code: ContextErrorCode, message: string) {
+    super(message);
+    this.name = 'ContextExtractionError';
+    this.code = code;
+  }
+}
+
+export function isPdfUrl(url: string): boolean {
+  const cleanUrl = url.split(/[?#]/)[0].toLowerCase();
+  return cleanUrl.endsWith('.pdf');
+}
 
 export interface PageContext {
   source: ContextSource;
@@ -96,58 +112,99 @@ export function extractReadableArticle(html: string, fallbackText: string): stri
   return capArticleLength(cleanPageText(fallbackText));
 }
 
+const PDF_ISOLATED_MESSAGE =
+  "Chrome's PDF viewer isolates document text — highlight any passage in the PDF and click Refresh, or paste text into a custom prompt.";
+
 export async function extractActiveTabContext(): Promise<PageContext> {
   if (typeof chrome === 'undefined' || !chrome.tabs || !chrome.scripting) {
-    throw new Error('Chrome extension APIs are unavailable outside the Chrome Side Panel.');
+    throw new ContextExtractionError(
+      'UNAVAILABLE',
+      'Chrome extension APIs are unavailable outside the Chrome Side Panel.',
+    );
   }
 
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab?.id) {
-    throw new Error('No active browser tab found.');
+    throw new ContextExtractionError('UNAVAILABLE', 'No active browser tab found.');
   }
 
   const url = tab.url ?? '';
   if (RESTRICTED_URL_PREFIXES.some((prefix) => url.startsWith(prefix))) {
-    throw new Error('Chrome system pages cannot be read. Switch to a regular webpage tab.');
+    throw new ContextExtractionError(
+      'UNAVAILABLE',
+      'Chrome system pages cannot be read. Switch to a regular webpage tab.',
+    );
   }
 
-  const results = await chrome.scripting.executeScript({
-    target: { tabId: tab.id },
-    func: (): { source: ContextSource; html?: string; rawText: string } => {
-      const selected = window.getSelection()?.toString().trim() ?? '';
-      if (selected) {
-        return { source: 'selection', rawText: selected };
-      }
-      const rawText = document.body?.innerText ?? '';
-      const rootClone = document.documentElement?.cloneNode(true) as HTMLElement | undefined;
-      if (!rootClone) {
-        return { source: 'page', html: '', rawText };
-      }
-      rootClone
-        .querySelectorAll('script, noscript, iframe, object, embed')
-        .forEach((node) => node.remove());
-      rootClone.querySelectorAll('*').forEach((el) => {
-        for (const attr of Array.from(el.attributes)) {
-          const name = attr.name.toLowerCase();
-          if (
-            name.startsWith('on') ||
-            ((name === 'href' || name === 'src') && attr.value.trim().toLowerCase().startsWith('javascript:'))
-          ) {
-            el.removeAttribute(attr.name);
-          }
+  const isFileUrl = url.startsWith('file://');
+  if (isFileUrl && chrome.extension?.isAllowedFileSchemeAccess) {
+    const allowed = await chrome.extension.isAllowedFileSchemeAccess();
+    if (!allowed) {
+      throw new ContextExtractionError(
+        'FILE_ACCESS_REQUIRED',
+        'Local file access is disabled for Espresso.',
+      );
+    }
+  }
+
+  let results: chrome.scripting.InjectionResult<{
+    source: ContextSource;
+    html?: string;
+    rawText: string;
+    isPdf?: boolean;
+  }>[];
+  try {
+    results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: (): { source: ContextSource; html?: string; rawText: string; isPdf?: boolean } => {
+        const selected = window.getSelection()?.toString().trim() ?? '';
+        if (selected) {
+          return { source: 'selection', rawText: selected };
         }
-      });
-      return {
-        source: 'page',
-        html: rootClone.outerHTML,
-        rawText,
-      };
-    },
-  });
+        const isPdf = document.contentType === 'application/pdf';
+        const rawText = document.body?.innerText ?? '';
+        const rootClone = document.documentElement?.cloneNode(true) as HTMLElement | undefined;
+        if (!rootClone) {
+          return { source: 'page', html: '', rawText, isPdf };
+        }
+        rootClone
+          .querySelectorAll('script, noscript, iframe, object, embed')
+          .forEach((node) => node.remove());
+        rootClone.querySelectorAll('*').forEach((el) => {
+          for (const attr of Array.from(el.attributes)) {
+            const name = attr.name.toLowerCase();
+            if (
+              name.startsWith('on') ||
+              ((name === 'href' || name === 'src') &&
+                attr.value.trim().toLowerCase().startsWith('javascript:'))
+            ) {
+              el.removeAttribute(attr.name);
+            }
+          }
+        });
+        return {
+          source: 'page',
+          html: rootClone.outerHTML,
+          rawText,
+          isPdf,
+        };
+      },
+    });
+  } catch (err) {
+    if (isPdfUrl(url) || isFileUrl) {
+      throw new ContextExtractionError('PDF_ISOLATED', PDF_ISOLATED_MESSAGE);
+    }
+    throw err;
+  }
 
   const payload = results[0]?.result;
+  const pdfContext = isPdfUrl(url) || Boolean(payload?.isPdf) || isFileUrl;
+
   if (!payload) {
-    throw new Error('Could not extract text from the active webpage.');
+    throw new ContextExtractionError(
+      pdfContext ? 'PDF_ISOLATED' : 'UNAVAILABLE',
+      pdfContext ? PDF_ISOLATED_MESSAGE : 'Could not extract text from the active webpage.',
+    );
   }
 
   const text =
@@ -156,7 +213,10 @@ export async function extractActiveTabContext(): Promise<PageContext> {
       : extractReadableArticle(payload.html ?? '', payload.rawText);
 
   if (!text) {
-    throw new Error('The active webpage appears to have no readable text.');
+    throw new ContextExtractionError(
+      pdfContext ? 'PDF_ISOLATED' : 'UNAVAILABLE',
+      pdfContext ? PDF_ISOLATED_MESSAGE : 'The active webpage appears to have no readable text.',
+    );
   }
 
   return {

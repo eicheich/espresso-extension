@@ -56,12 +56,12 @@ export function AuthModal({ user, isSyncing, onSyncNow, onClose }: AuthModalProp
         <div className="mb-3 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Cloud className="h-4 w-4 text-[#0071E3]" />
-            <h2 className="text-[15px] font-semibold text-[#1D1D1F]">Cloud Sync</h2>
+            <h2 className="text-[15px] font-semibold text-[#1D1D1F]">Account &amp; Prompt Sync</h2>
           </div>
           <button
             type="button"
             onClick={onClose}
-            aria-label="Close cloud sync modal"
+            aria-label="Close account and prompt sync modal"
             className="rounded-lg p-1 text-neutral-400 transition hover:bg-neutral-100 hover:text-neutral-700"
           >
             <X className="h-4 w-4" />
