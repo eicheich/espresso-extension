@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import Markdown from 'react-markdown';
-import { Check, Copy, Loader2, X, AlertCircle } from 'lucide-react';
+import { Check, Copy, Loader2, RotateCcw, X, AlertCircle } from 'lucide-react';
 import { resolveInferenceBadge } from '../lib/ai';
 
 interface OutputCardProps {
@@ -9,7 +9,9 @@ interface OutputCardProps {
   downloadProgress: number | null;
   outputText: string;
   inferenceSource: string | undefined;
+  elapsedMs: number | null;
   error: string | null;
+  onRegenerate: () => void;
   onClose: () => void;
 }
 
@@ -19,7 +21,9 @@ export function OutputCard({
   downloadProgress,
   outputText,
   inferenceSource,
+  elapsedMs,
   error,
+  onRegenerate,
   onClose,
 }: OutputCardProps) {
   const [copied, setCopied] = useState(false);
@@ -32,23 +36,32 @@ export function OutputCard({
   };
 
   const badge = inferenceSource ? resolveInferenceBadge(inferenceSource) : null;
+  const formattedTime = elapsedMs !== null ? `${(elapsedMs / 1000).toFixed(1)}s` : null;
 
   return (
     <section className="rounded-2xl border border-black/8 bg-white p-3.5 shadow-[0_1px_3px_rgba(0,0,0,0.05)]">
       <div className="mb-2.5 flex items-start justify-between gap-2">
         <div className="min-w-0">
           <p className="truncate text-[13px] font-semibold text-[#1D1D1F]">{promptTitle}</p>
-          {badge && !error && (
-            <span
-              className={`mt-1 inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
-                badge.kind === 'on-device'
-                  ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
-                  : 'bg-sky-50 text-sky-700 ring-1 ring-sky-200'
-              }`}
-            >
-              {badge.label}
-            </span>
-          )}
+          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+            {badge && !error && (
+              <span
+                className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
+                  badge.kind === 'on-device'
+                    ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
+                    : 'bg-sky-50 text-sky-700 ring-1 ring-sky-200'
+                }`}
+              >
+                {badge.label}
+                {!isRunning && formattedTime ? ` • ${formattedTime}` : ''}
+              </span>
+            )}
+            {isRunning && formattedTime && (
+              <span className="inline-flex items-center rounded-full bg-[#F5F5F7] px-2 py-0.5 text-[11px] font-medium tabular-nums text-neutral-600">
+                {formattedTime}...
+              </span>
+            )}
+          </div>
         </div>
         <button
           type="button"
@@ -83,7 +96,7 @@ export function OutputCard({
           <div className="markdown-output max-h-[340px] overflow-y-auto pr-1">
             <Markdown>{outputText}</Markdown>
           </div>
-          <div className="mt-3 flex items-center justify-between border-t border-black/5 pt-2.5">
+          <div className="mt-3 flex items-center justify-between gap-2 border-t border-black/5 pt-2.5">
             {isRunning ? (
               <span className="inline-flex items-center gap-1.5 text-[11px] text-neutral-500">
                 <Loader2 className="h-3 w-3 animate-spin text-[#0071E3]" />
@@ -93,23 +106,33 @@ export function OutputCard({
               <span />
             )}
             {!isRunning && (
-              <button
-                type="button"
-                onClick={() => void handleCopy()}
-                className="inline-flex items-center gap-1.5 rounded-full bg-[#F5F5F7] px-3 py-1.5 text-[12px] font-medium text-[#1D1D1F] transition hover:bg-neutral-200/80"
-              >
-                {copied ? (
-                  <>
-                    <Check className="h-3.5 w-3.5 text-emerald-600" />
-                    <span>Copied</span>
-                  </>
-                ) : (
-                  <>
-                    <Copy className="h-3.5 w-3.5 text-neutral-500" />
-                    <span>Copy Result</span>
-                  </>
-                )}
-              </button>
+              <div className="flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={onRegenerate}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-[#F5F5F7] px-3 py-1.5 text-[12px] font-medium text-[#1D1D1F] transition hover:bg-neutral-200/80"
+                >
+                  <RotateCcw className="h-3.5 w-3.5 text-neutral-500" />
+                  <span>Regenerate</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleCopy()}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-[#F5F5F7] px-3 py-1.5 text-[12px] font-medium text-[#1D1D1F] transition hover:bg-neutral-200/80"
+                >
+                  {copied ? (
+                    <>
+                      <Check className="h-3.5 w-3.5 text-emerald-600" />
+                      <span>Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="h-3.5 w-3.5 text-neutral-500" />
+                      <span>Copy Result</span>
+                    </>
+                  )}
+                </button>
+              </div>
             )}
           </div>
         </>

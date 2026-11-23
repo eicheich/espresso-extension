@@ -8,12 +8,17 @@ import { estimateTokens } from './context';
 import { ai } from './firebase';
 
 const CLOUD_FALLBACK_MODELS = [
+  'gemini-3.5-flash-lite',
   'gemini-4-hydrogen',
   'gemini-3.8-flash',
-  'gemini-3.5-flash-lite',
 ] as const;
-const CLOUD_INITIAL_TIMEOUT_MS = 20_000;
-const SAFE_ON_DEVICE_TOKEN_LIMIT = 9000;
+const CLOUD_INITIAL_TIMEOUT_MS = 8_000;
+const SAFE_ON_DEVICE_TOKEN_LIMIT = 3_500;
+
+const FAST_GENERATION_CONFIG = {
+  maxOutputTokens: 800,
+  temperature: 0.4,
+};
 
 export interface InferenceBadge {
   kind: 'on-device' | 'cloud';
@@ -48,6 +53,7 @@ function getHybridModel(): GenerativeModel {
       mode: InferenceMode.PREFER_ON_DEVICE,
       inCloudParams: {
         model: CLOUD_FALLBACK_MODELS[0],
+        generationConfig: FAST_GENERATION_CONFIG,
       },
     });
   }
@@ -61,6 +67,7 @@ function getCloudModel(modelName: string): GenerativeModel {
       mode: InferenceMode.ONLY_IN_CLOUD,
       inCloudParams: {
         model: modelName,
+        generationConfig: FAST_GENERATION_CONFIG,
       },
     });
     cachedCloudModels.set(modelName, model);
@@ -71,12 +78,19 @@ function getCloudModel(modelName: string): GenerativeModel {
 function normalizeErrorText(error: unknown): string {
   if (!error) return '';
   if (typeof error === 'string') return error.toLowerCase();
-  const errObj = error as { name?: unknown; message?: unknown; status?: unknown; code?: unknown };
+  const errObj = error as {
+    name?: unknown;
+    message?: unknown;
+    status?: unknown;
+    httpStatusCode?: unknown;
+    code?: unknown;
+    customErrorData?: { status?: unknown };
+  };
   const name = error instanceof Error ? error.name : String(errObj.name ?? '');
   const message = error instanceof Error ? error.message : String(errObj.message ?? '');
-  const status = errObj.status !== undefined ? String(errObj.status) : '';
+  const status = errObj.status ?? errObj.httpStatusCode ?? errObj.customErrorData?.status ?? '';
   const code = errObj.code !== undefined ? String(errObj.code) : '';
-  return `${name} ${status} ${code} ${message}`.toLowerCase();
+  return `${name} ${String(status)} ${code} ${message}`.toLowerCase();
 }
 
 export function isOnDeviceContextLimitError(error: unknown): boolean {
@@ -124,13 +138,16 @@ async function withTimeout<T>(promise: Promise<T>, ms: number, modelName: string
   }
 }
 
+const DIRECT_OUTPUT_SYSTEM_INSTRUCTION =
+  'Respond directly with the requested output in clean Markdown. Omit conversational filler, preambles, and meta-commentary (e.g., never start with "Here is a summary...").';
+
 export function buildHybridPrompt(instruction: string, contextText: string): string {
   const trimmedInstruction = instruction.trim();
   const trimmedContext = contextText.trim();
   if (!trimmedContext) {
-    return trimmedInstruction;
+    return `${DIRECT_OUTPUT_SYSTEM_INSTRUCTION}\n\n${trimmedInstruction}`;
   }
-  return `${trimmedInstruction}\n\n---\nWebpage Context:\n${trimmedContext}`;
+  return `${DIRECT_OUTPUT_SYSTEM_INSTRUCTION}\n\n${trimmedInstruction}\n\n---\nWebpage Context:\n${trimmedContext}`;
 }
 
 export function resolveInferenceBadge(source: string | undefined): InferenceBadge {

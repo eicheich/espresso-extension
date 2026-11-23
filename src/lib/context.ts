@@ -1,6 +1,7 @@
 import { Readability } from '@mozilla/readability';
 
 export const NANO_TOKEN_LIMIT = 9216;
+export const MAX_ARTICLE_CHARS = 15_000;
 
 export type ContextSource = 'selection' | 'page';
 
@@ -52,6 +53,16 @@ export function getTokenStatus(tokens: number): TokenStatus {
   };
 }
 
+export function capArticleLength(text: string, maxChars = MAX_ARTICLE_CHARS): string {
+  if (text.length <= maxChars) return text;
+  const sliced = text.slice(0, maxChars);
+  const lastBreak = Math.max(sliced.lastIndexOf('\n\n'), sliced.lastIndexOf('. '));
+  if (lastBreak > maxChars - 500) {
+    return sliced.slice(0, lastBreak + 1).trim();
+  }
+  return sliced.trim();
+}
+
 export function extractReadableArticle(html: string, fallbackText: string): string {
   if (typeof DOMParser !== 'undefined' && html.trim()) {
     try {
@@ -61,16 +72,16 @@ export function extractReadableArticle(html: string, fallbackText: string): stri
       const articleText = article?.textContent ? cleanPageText(article.textContent) : '';
       if (articleText) {
         const title = article?.title?.trim();
-        if (title && !articleText.startsWith(title)) {
-          return `${title}\n\n${articleText}`;
-        }
-        return articleText;
+        const combined = title && !articleText.startsWith(title)
+          ? `${title}\n\n${articleText}`
+          : articleText;
+        return capArticleLength(combined);
       }
     } catch {
       // Fall back to cleaned innerText if Readability fails on malformed DOM.
     }
   }
-  return cleanPageText(fallbackText);
+  return capArticleLength(cleanPageText(fallbackText));
 }
 
 export async function extractActiveTabContext(): Promise<PageContext> {

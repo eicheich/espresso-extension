@@ -6,10 +6,12 @@ import {
   resolveInferenceBadge,
 } from './ai';
 import {
+  capArticleLength,
   cleanPageText,
   estimateTokens,
   extractReadableArticle,
   getTokenStatus,
+  MAX_ARTICLE_CHARS,
   NANO_TOKEN_LIMIT,
 } from './context';
 import { reorderPrompts, STARTER_PROMPTS } from './prompts';
@@ -40,6 +42,16 @@ describe('context helpers', () => {
     expect(extractReadableArticle('<article><p>Body</p></article>', 'Clean fallback  text')).toBe(
       'Clean fallback text',
     );
+  });
+
+  it('caps extracted article text at 15,000 characters cleanly', () => {
+    const shortText = 'Short article.';
+    expect(capArticleLength(shortText)).toBe(shortText);
+
+    const longText = `${'a'.repeat(14_800)}. ${'b'.repeat(1_000)}`;
+    const capped = capArticleLength(longText);
+    expect(capped.length).toBeLessThanOrEqual(MAX_ARTICLE_CHARS);
+    expect(capped.endsWith('.')).toBe(true);
   });
 });
 
@@ -86,7 +98,7 @@ describe('hybrid AI helpers', () => {
     expect(isTransientCloudError(new Error('HTTP 503 Service Unavailable: high demand'))).toBe(true);
     expect(isTransientCloudError(new Error('500 Internal error encountered'))).toBe(true);
     expect(isTransientCloudError({ status: 503, message: 'overloaded' })).toBe(true);
-    expect(isTransientCloudError(new Error('Request to gemini-4-hydrogen timed out after 20s.'))).toBe(true);
+    expect(isTransientCloudError(new Error('Request to gemini-3.5-flash-lite timed out after 8s.'))).toBe(true);
     expect(isTransientCloudError(new Error('400 Invalid API key'))).toBe(false);
     expect(isTransientCloudError(new Error('Permission denied'))).toBe(false);
     expect(isTransientCloudError(null)).toBe(false);

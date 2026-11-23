@@ -53,12 +53,16 @@ export default function App() {
 
   const [runningPromptId, setRunningPromptId] = useState<string | null>(null);
   const [outputState, setOutputState] = useState<{
-    promptTitle: string;
+    prompt: PromptItem;
     isRunning: boolean;
     outputText: string;
     inferenceSource: string | undefined;
+    elapsedMs: number | null;
     error: string | null;
   } | null>(null);
+
+  const runStartRef = useRef<number | null>(null);
+  const [liveElapsedMs, setLiveElapsedMs] = useState<number | null>(null);
 
   const targetTextRef = useRef('');
   const displayedLenRef = useRef(0);
@@ -163,16 +167,20 @@ export default function App() {
   };
 
   const handleRunPrompt = async (prompt: PromptItem) => {
+    const startTime = performance.now();
+    runStartRef.current = startTime;
+    setLiveElapsedMs(0);
     setRunningPromptId(prompt.id);
     setDownloadProgress(null);
     targetTextRef.current = '';
     displayedLenRef.current = 0;
     setDisplayedText('');
     setOutputState({
-      promptTitle: prompt.title,
+      prompt,
       isRunning: true,
       outputText: '',
       inferenceSource: undefined,
+      elapsedMs: null,
       error: null,
     });
 
@@ -203,20 +211,23 @@ export default function App() {
         },
       });
 
+      const finalElapsedMs = performance.now() - startTime;
       targetTextRef.current = result.text;
       setOutputState({
-        promptTitle: prompt.title,
+        prompt,
         isRunning: false,
         outputText: result.text,
         inferenceSource: result.inferenceSource,
+        elapsedMs: finalElapsedMs,
         error: null,
       });
     } catch (err) {
       setOutputState({
-        promptTitle: prompt.title,
+        prompt,
         isRunning: false,
         outputText: '',
         inferenceSource: undefined,
+        elapsedMs: null,
         error: err instanceof Error ? err.message : 'Inference failed. Please try again.',
       });
     } finally {
@@ -293,6 +304,15 @@ export default function App() {
       !outputState.error &&
       (outputState.isRunning || displayedText.length < outputState.outputText.length),
   );
+
+  useEffect(() => {
+    if (!isOutputStreaming || runStartRef.current === null) return;
+    const startTime = runStartRef.current;
+    const interval = setInterval(() => {
+      setLiveElapsedMs(performance.now() - startTime);
+    }, 100);
+    return () => clearInterval(interval);
+  }, [isOutputStreaming]);
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-[420px] flex-col gap-3 px-3.5 py-3.5">
@@ -418,12 +438,14 @@ export default function App() {
       {/* Output Card */}
       {outputState && (
         <OutputCard
-          promptTitle={outputState.promptTitle}
+          promptTitle={outputState.prompt.title}
           isRunning={isOutputStreaming}
           downloadProgress={downloadProgress}
           outputText={displayedText}
           inferenceSource={outputState.inferenceSource}
+          elapsedMs={outputState.elapsedMs ?? liveElapsedMs}
           error={outputState.error}
+          onRegenerate={() => void handleRunPrompt(outputState.prompt)}
           onClose={() => setOutputState(null)}
         />
       )}
@@ -483,7 +505,7 @@ export default function App() {
                   </button>
                 </div>
 
-                <div className="mt-2 flex items-center justify-end gap-1 border-t border-black/5 pt-1.5">
+                <div className="mt-2 flex items-center justify-end gap-1 border-t border-black/5 pt-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
                   <button
                     type="button"
                     disabled={index === 0}
