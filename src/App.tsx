@@ -17,7 +17,12 @@ import {
   X,
 } from 'lucide-react';
 import { isFirebaseConfigured } from './lib/firebase';
-import { buildHybridPrompt, runHybridPrompt, warmUpLocalModel } from './lib/ai';
+import {
+  buildHybridPrompt,
+  LocalAiWarmupRequiredError,
+  runHybridPrompt,
+  warmUpLocalModel,
+} from './lib/ai';
 import {
   estimateTokens,
   extractActiveTabContext,
@@ -71,6 +76,8 @@ export default function App() {
     isRunning: boolean;
     outputText: string;
     inferenceSource: string | undefined;
+    notice: string | null;
+    needsLocalWarmup: boolean;
     elapsedMs: number | null;
     error: string | null;
   } | null>(null);
@@ -204,6 +211,8 @@ export default function App() {
       isRunning: true,
       outputText: '',
       inferenceSource: undefined,
+      notice: null,
+      needsLocalWarmup: false,
       elapsedMs: null,
       error: null,
     });
@@ -242,6 +251,8 @@ export default function App() {
         isRunning: false,
         outputText: result.text,
         inferenceSource: result.inferenceSource,
+        notice: result.notice ?? null,
+        needsLocalWarmup: false,
         elapsedMs: finalElapsedMs,
         error: null,
       });
@@ -251,6 +262,8 @@ export default function App() {
         isRunning: false,
         outputText: '',
         inferenceSource: undefined,
+        notice: null,
+        needsLocalWarmup: err instanceof LocalAiWarmupRequiredError,
         elapsedMs: null,
         error: err instanceof Error ? err.message : 'Inference failed. Please try again.',
       });
@@ -511,8 +524,12 @@ export default function App() {
             downloadProgress={downloadProgress}
             outputText={displayedText}
             inferenceSource={outputState.inferenceSource}
+            notice={outputState.notice}
+            needsLocalWarmup={outputState.needsLocalWarmup}
+            isWarmingLocalAi={localAiStatus === 'warming'}
             elapsedMs={outputState.elapsedMs ?? liveElapsedMs}
             error={outputState.error}
+            onWarmUpLocalAi={() => void handleWarmUpLocalAi()}
             onRegenerate={() => void handleRunPrompt(outputState.prompt)}
             onBack={() => setActiveView('prompts')}
           />

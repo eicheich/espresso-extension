@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import Markdown from 'react-markdown';
-import { ArrowLeft, Check, Copy, Loader2, RotateCcw, AlertCircle } from 'lucide-react';
+import { ArrowLeft, Check, Copy, Cpu, Info, Loader2, RotateCcw, AlertCircle } from 'lucide-react';
 import { resolveInferenceBadge } from '../lib/ai';
 
 interface OutputCardProps {
@@ -10,8 +10,12 @@ interface OutputCardProps {
   downloadProgress: number | null;
   outputText: string;
   inferenceSource: string | undefined;
+  notice?: string | null;
+  needsLocalWarmup?: boolean;
+  isWarmingLocalAi?: boolean;
   elapsedMs: number | null;
   error: string | null;
+  onWarmUpLocalAi?: () => void;
   onRegenerate: () => void;
   onBack: () => void;
 }
@@ -23,8 +27,12 @@ export function OutputCard({
   downloadProgress,
   outputText,
   inferenceSource,
+  notice,
+  needsLocalWarmup,
+  isWarmingLocalAi,
   elapsedMs,
   error,
+  onWarmUpLocalAi,
   onRegenerate,
   onBack,
 }: OutputCardProps) {
@@ -91,25 +99,63 @@ export function OutputCard({
 
       {!isRunning && error && (
         <div className="space-y-2.5">
-          <div className="flex items-start gap-2 rounded-xl bg-red-50 px-3 py-2.5 text-[12px] text-red-700">
-            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
-            <span>{error}</span>
-          </div>
-          <div className="flex justify-end">
-            <button
-              type="button"
-              onClick={onRegenerate}
-              className="inline-flex items-center gap-1.5 rounded-full bg-[#F5F5F7] px-3 py-1.5 text-[12px] font-medium text-[#1D1D1F] transition hover:bg-neutral-200/80"
-            >
-              <RotateCcw className="h-3.5 w-3.5 text-neutral-500" />
-              <span>Try Again</span>
-            </button>
-          </div>
+          {needsLocalWarmup ? (
+            <div className="space-y-2.5 rounded-xl border border-amber-200 bg-amber-50/80 px-3 py-2.5 text-[12px] leading-relaxed text-amber-900">
+              <div className="flex items-start gap-2">
+                <Cpu className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                <span>{error}</span>
+              </div>
+              <div className="flex flex-wrap items-center justify-end gap-1.5 pt-0.5">
+                {onWarmUpLocalAi && (
+                  <button
+                    type="button"
+                    disabled={isWarmingLocalAi}
+                    onClick={onWarmUpLocalAi}
+                    className="inline-flex items-center gap-1.5 rounded-full bg-[#1D1D1F] px-3 py-1.5 text-[12px] font-medium text-white transition hover:bg-black disabled:opacity-60"
+                  >
+                    <Cpu className="h-3.5 w-3.5" />
+                    <span>{isWarmingLocalAi ? 'Warming Up...' : 'Warm Up Local AI'}</span>
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onRegenerate}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[12px] font-medium text-[#1D1D1F] ring-1 ring-black/10 transition hover:bg-neutral-50"
+                >
+                  <RotateCcw className="h-3.5 w-3.5 text-neutral-500" />
+                  <span>Try Again</span>
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="flex items-start gap-2 rounded-xl bg-red-50 px-3 py-2.5 text-[12px] text-red-700">
+                <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" />
+                <span>{error}</span>
+              </div>
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={onRegenerate}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-[#F5F5F7] px-3 py-1.5 text-[12px] font-medium text-[#1D1D1F] transition hover:bg-neutral-200/80"
+                >
+                  <RotateCcw className="h-3.5 w-3.5 text-neutral-500" />
+                  <span>Try Again</span>
+                </button>
+              </div>
+            </>
+          )}
         </div>
       )}
 
       {!error && outputText && (
         <>
+          {notice && (
+            <div className="mb-2.5 flex items-start gap-2 rounded-xl border border-amber-200/80 bg-amber-50/70 px-2.5 py-2 text-[11px] leading-snug text-amber-900">
+              <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-700" />
+              <span>{notice}</span>
+            </div>
+          )}
           <div className="markdown-output max-h-[60vh] overflow-y-auto pr-1">
             <Markdown>{outputText}</Markdown>
           </div>

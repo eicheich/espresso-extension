@@ -2,9 +2,13 @@ import { describe, expect, it } from 'vitest';
 import {
   buildHybridPrompt,
   isOnDeviceContextLimitError,
+  isQuotaLimitError,
   isStreamParseError,
   isTransientCloudError,
+  LOCAL_FALLBACK_MAX_CHARS,
+  LocalAiWarmupRequiredError,
   resolveInferenceBadge,
+  truncateForLocalFallback,
 } from './ai';
 import {
   capArticleLength,
@@ -120,9 +124,35 @@ describe('hybrid AI helpers', () => {
     expect(isStreamParseError(new Error('Failed to parse stream (AI/parse-failed)'))).toBe(true);
     expect(isTransientCloudError(new Error('Failed to parse stream (AI/parse-failed)'))).toBe(true);
     expect(isTransientCloudError(new Error('HTTP 429: Quota exceeded for free tier'))).toBe(true);
+    expect(isQuotaLimitError({ status: 429, message: 'RESOURCE_EXHAUSTED: rate limit' })).toBe(true);
     expect(isTransientCloudError({ status: 429, message: 'RESOURCE_EXHAUSTED: rate limit' })).toBe(true);
+    expect(isQuotaLimitError(new Error('500 Internal error'))).toBe(false);
     expect(isTransientCloudError(new Error('400 Invalid API key'))).toBe(false);
     expect(isTransientCloudError(new Error('Permission denied'))).toBe(false);
     expect(isTransientCloudError(null)).toBe(false);
+  });
+
+  it('truncates long context cleanly at sentence boundaries for local Nano fallback', () => {
+    const short = 'First sentence. Second sentence!';
+    expect(truncateForLocalFallback(short)).toBe(short);
+
+    const long = `${'A'.repeat(10_980)}. Tail sentence that exceeds 11000 characters! Extra words.`;
+    const truncated = truncateForLocalFallback(long);
+    expect(truncated.length).toBeLessThanOrEqual(LOCAL_FALLBACK_MAX_CHARS);
+    expect(truncated.endsWith('.')).toBe(true);
+
+    const questionBoundary = `${'B'.repeat(10_990)}? Overflow text here.`;
+    const truncatedQuestion = truncateForLocalFallback(questionBoundary);
+    expect(truncatedQuestion.length).toBeLessThanOrEqual(LOCAL_FALLBACK_MAX_CHARS);
+    expect(truncatedQuestion.endsWith('?')).toBe(true);
+  });
+
+  it('produces clean user-facing quota guidance without raw AI/fetch-error URLs or JSON', () => {
+    const err = new LocalAiWarmupRequiredError();
+    expect(err.requiresLocalWarmup).toBe(true);
+    expect(err.message).not.toMatch(/https?:\/\//i);
+    expect(err.message).not.toMatch(/AI\/fetch-error/i);
+    expect(err.message).not.toMatch(/[\{\}]/);
+    expect(err.message).toContain('Warm Up Local AI');
   });
 });

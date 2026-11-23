@@ -10,10 +10,15 @@ import { ai } from './firebase';
 const CLOUD_FALLBACK_MODELS = [
   'gemini-3.5-flash-lite',
   'gemini-4-hydrogen',
-  'gemini-3.8-flash',
 ] as const;
 const CLOUD_INITIAL_TIMEOUT_MS = 8_000;
 const SAFE_ON_DEVICE_TOKEN_LIMIT = 3_500;
+export const LOCAL_FALLBACK_MAX_CHARS = 11_000;
+
+export const LOCAL_FALLBACK_NOTICE =
+  'Cloud daily capacity reached — summarized the primary section privately on Gemini Nano 4. Tip: Highlight specific text to run 100% locally anytime.';
+export const LOCAL_WARMUP_REQUIRED_MESSAGE =
+  "Cloud daily capacity is full and Local AI (Gemini Nano 4) isn't active yet. Click 'Warm Up Local AI' to enable offline on-device mode, or highlight a shorter paragraph.";
 
 const FAST_GENERATION_CONFIG = {
   maxOutputTokens: 800,
@@ -28,6 +33,16 @@ export interface InferenceBadge {
 export interface HybridPromptResult {
   text: string;
   inferenceSource: InferenceSource | string | undefined;
+  notice?: string;
+}
+
+export class LocalAiWarmupRequiredError extends Error {
+  readonly requiresLocalWarmup = true;
+
+  constructor(message = LOCAL_WARMUP_REQUIRED_MESSAGE) {
+    super(message);
+    this.name = 'LocalAiWarmupRequiredError';
+  }
 }
 
 export interface RunHybridPromptOptions {
@@ -36,6 +51,7 @@ export interface RunHybridPromptOptions {
 }
 
 let cachedHybridModel: GenerativeModel | null = null;
+let cachedOnDeviceModel: GenerativeModel | null = null;
 const cachedCloudModels = new Map<string, GenerativeModel>();
 
 function requireAI() {
@@ -58,6 +74,15 @@ function getHybridModel(): GenerativeModel {
     });
   }
   return cachedHybridModel;
+}
+
+function getOnDeviceOnlyModel(): GenerativeModel {
+  if (!cachedOnDeviceModel) {
+    cachedOnDeviceModel = getGenerativeModel(requireAI(), {
+      mode: InferenceMode.ONLY_ON_DEVICE,
+    });
+  }
+  return cachedOnDeviceModel;
 }
 
 function getCloudModel(modelName: string): GenerativeModel {
@@ -118,19 +143,29 @@ export function isStreamParseError(error: unknown): boolean {
   );
 }
 
+export function isQuotaLimitError(error: unknown): boolean {
+  const combined = normalizeErrorText(error);
+  if (!combined) return false;
+
+  return (
+    /\b429\b/.test(combined) ||
+    combined.includes('quota') ||
+    combined.includes('rate limit') ||
+    combined.includes('resource_exhausted')
+  );
+}
+
 export function isTransientCloudError(error: unknown): boolean {
   const combined = normalizeErrorText(error);
   if (!combined) return false;
 
   return (
     isStreamParseError(error) ||
+    isQuotaLimitError(error) ||
     combined.includes('timed out') ||
     combined.includes('timeout') ||
     combined.includes('aborterror') ||
-    /\b(429|500|503)\b/.test(combined) ||
-    combined.includes('quota') ||
-    combined.includes('rate limit') ||
-    combined.includes('resource_exhausted') ||
+    /\b(500|503)\b/.test(combined) ||
     combined.includes('high demand') ||
     combined.includes('overloaded') ||
     combined.includes('service unavailable') ||
@@ -245,30 +280,56 @@ async function consumeStream(
   };
 }
 
+export function truncateForLocalFallback(
+  text: string,
+  maxChars = LOCAL_FALLBACK_MAX_CHARS,
+): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+
+  const sliced = trimmed.slice(0, maxChars);
+  const lastBoundary = Math.max(
+    sliced.lastIndexOf('. '),
+    sliced.lastIndexOf('! '),
+    sliced.lastIndexOf('? '),
+  );
+  if (lastBoundary > 0) {
+    return sliced.slice(0, lastBoundary + 1).trim();
+  }
+  return sliced.trim();
+}
+
+async function getLocalModelAvailability(): Promise<string> {
+  const api = (globalThis as { LanguageModel?: { availability?: () => Promise<string> } })
+    .LanguageModel;
+  if (!api?.availability) return 'no';
+  try {
+    return await api.availability();
+  } catch {
+    return 'no';
+  }
+}
+
 async function runCloudFallback(
-  prompt: string,
+  instruction: string,
+  contextText: string,
   startIndex = 0,
   onChunk?: (accumulatedText: string, inferenceSource?: string) => void,
+  priorErrors: unknown[] = [],
 ): Promise<HybridPromptResult> {
-  let lastError: unknown;
+  const prompt = buildHybridPrompt(instruction, contextText);
+  const errors: unknown[] = [...priorErrors];
+  let lastError: unknown = priorErrors[priorErrors.length - 1];
+
   for (let i = startIndex; i < CLOUD_FALLBACK_MODELS.length; i++) {
     const modelName = CLOUD_FALLBACK_MODELS[i];
     try {
       return await consumeStream(getCloudModel(modelName), prompt, modelName, true, onChunk);
     } catch (err) {
+      console.warn(`Model ${modelName} failed:`, err);
+      errors.push(err);
       lastError = err;
-      const hasBackup = i + 1 < CLOUD_FALLBACK_MODELS.length;
-      if (hasBackup && isTransientCloudError(err)) {
-        console.warn(
-          `${modelName} unavailable (${err instanceof Error ? err.message : 'error'}); falling back to ${CLOUD_FALLBACK_MODELS[i + 1]}:`,
-          err,
-        );
-        continue;
-      }
-      if (!hasBackup && isStreamParseError(err)) {
-        break;
-      }
-      throw err;
+      continue;
     }
   }
 
@@ -276,17 +337,48 @@ async function runCloudFallback(
   if (isStreamParseError(lastError)) {
     const fallbackName = CLOUD_FALLBACK_MODELS[0];
     console.warn(`Cloud streaming parse failed; retrying non-streaming request on ${fallbackName}.`);
-    const result = await withTimeout(
-      getCloudModel(fallbackName).generateContent(prompt),
-      CLOUD_INITIAL_TIMEOUT_MS,
-      fallbackName,
-    );
-    const text = result.response.text();
-    onChunk?.(text, InferenceSource.IN_CLOUD);
-    return {
-      text,
-      inferenceSource: InferenceSource.IN_CLOUD,
-    };
+    try {
+      const result = await withTimeout(
+        getCloudModel(fallbackName).generateContent(prompt),
+        CLOUD_INITIAL_TIMEOUT_MS,
+        fallbackName,
+      );
+      const text = result.response.text();
+      onChunk?.(text, InferenceSource.IN_CLOUD);
+      return {
+        text,
+        inferenceSource: InferenceSource.IN_CLOUD,
+      };
+    } catch (err) {
+      console.warn(`Model ${fallbackName} non-streaming fallback failed:`, err);
+      errors.push(err);
+      lastError = err;
+    }
+  }
+
+  if (errors.some(isQuotaLimitError)) {
+    const availability = await getLocalModelAvailability();
+    if (availability === 'readily' || availability === 'available') {
+      try {
+        const truncatedContext = truncateForLocalFallback(contextText);
+        const localPrompt = buildHybridPrompt(instruction, truncatedContext);
+        const localResult = await consumeStream(
+          getOnDeviceOnlyModel(),
+          localPrompt,
+          'gemini-nano',
+          false,
+          onChunk,
+        );
+        return {
+          text: localResult.text,
+          inferenceSource: InferenceSource.ON_DEVICE,
+          notice: LOCAL_FALLBACK_NOTICE,
+        };
+      } catch (localErr) {
+        console.warn('Smart local Gemini Nano fallback failed after cloud quota 429:', localErr);
+      }
+    }
+    throw new LocalAiWarmupRequiredError();
   }
 
   throw lastError instanceof Error ? lastError : new Error('All cloud fallback models failed.');
@@ -304,7 +396,7 @@ export async function runHybridPrompt(
 
   // Pre-check: skip on-device execution when payload exceeds safe Gemini Nano window.
   if (estimateTokens(prompt) > SAFE_ON_DEVICE_TOKEN_LIMIT) {
-    return runCloudFallback(prompt, 0, options?.onChunk);
+    return runCloudFallback(instruction, contextText, 0, options?.onChunk);
   }
 
   const model = getHybridModel();
@@ -321,14 +413,14 @@ export async function runHybridPrompt(
   } catch (err) {
     if (isOnDeviceContextLimitError(err)) {
       console.warn('On-device context limit exceeded; retrying via Gemini Cloud:', err);
-      return runCloudFallback(prompt, 0, options?.onChunk);
+      return runCloudFallback(instruction, contextText, 0, options?.onChunk);
     }
     if (isTransientCloudError(err)) {
       console.warn(
-        `${CLOUD_FALLBACK_MODELS[0]} timed out or hit transient 500/503; switching to ${CLOUD_FALLBACK_MODELS[1]}:`,
+        `${CLOUD_FALLBACK_MODELS[0]} failed with transient error; switching to ${CLOUD_FALLBACK_MODELS[1]}:`,
         err,
       );
-      return runCloudFallback(prompt, 1, options?.onChunk);
+      return runCloudFallback(instruction, contextText, 1, options?.onChunk, [err]);
     }
     throw err;
   }
