@@ -1,79 +1,47 @@
-export interface UsageStats {
-  totalShots: number;
-  onDeviceShots: number;
-  cloudShots: number;
-  tokensSavedOnDevice: number;
-}
+const PINNED_PROMPT_IDS_KEY = 'espresso_pinned_prompt_ids';
+const LOCAL_ONLY_MODE_KEY = 'espresso_local_only_mode';
 
-const USAGE_STATS_KEY = 'espresso_usage_stats';
-
-const DEFAULT_USAGE_STATS: UsageStats = {
-  totalShots: 0,
-  onDeviceShots: 0,
-  cloudShots: 0,
-  tokensSavedOnDevice: 0,
-};
-
-function sanitizeUsageStats(raw: unknown): UsageStats {
-  if (!raw || typeof raw !== 'object') return { ...DEFAULT_USAGE_STATS };
-  const obj = raw as Partial<UsageStats>;
-  return {
-    totalShots: typeof obj.totalShots === 'number' && obj.totalShots >= 0 ? obj.totalShots : 0,
-    onDeviceShots:
-      typeof obj.onDeviceShots === 'number' && obj.onDeviceShots >= 0 ? obj.onDeviceShots : 0,
-    cloudShots: typeof obj.cloudShots === 'number' && obj.cloudShots >= 0 ? obj.cloudShots : 0,
-    tokensSavedOnDevice:
-      typeof obj.tokensSavedOnDevice === 'number' && obj.tokensSavedOnDevice >= 0
-        ? obj.tokensSavedOnDevice
-        : 0,
-  };
-}
-
-export async function loadUsageStats(): Promise<UsageStats> {
-  if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-    const stored = await chrome.storage.local.get(USAGE_STATS_KEY);
-    return sanitizeUsageStats(stored[USAGE_STATS_KEY]);
-  }
-
-  const raw = localStorage.getItem(USAGE_STATS_KEY);
-  if (!raw) return { ...DEFAULT_USAGE_STATS };
+async function readLocalSetting<T>(key: string, fallback: T): Promise<T> {
   try {
-    return sanitizeUsageStats(JSON.parse(raw));
+    if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+      const result = await chrome.storage.local.get(key);
+      return result?.[key] !== undefined ? (result[key] as T) : fallback;
+    }
+    const raw = localStorage.getItem(key);
+    return raw !== null ? (JSON.parse(raw) as T) : fallback;
   } catch {
-    return { ...DEFAULT_USAGE_STATS };
+    return fallback;
   }
 }
 
-export async function recordUsageShot(isOnDevice: boolean, tokens: number): Promise<UsageStats> {
-  const current = await loadUsageStats();
-  const safeTokens = Math.max(0, Math.round(tokens));
-  const next: UsageStats = {
-    totalShots: current.totalShots + 1,
-    onDeviceShots: current.onDeviceShots + (isOnDevice ? 1 : 0),
-    cloudShots: current.cloudShots + (isOnDevice ? 0 : 1),
-    tokensSavedOnDevice: current.tokensSavedOnDevice + (isOnDevice ? safeTokens : 0),
-  };
-
+async function writeLocalSetting<T>(key: string, value: T): Promise<void> {
   if (typeof chrome !== 'undefined' && chrome.storage?.local) {
-    await chrome.storage.local.set({ [USAGE_STATS_KEY]: next });
-    return next;
+    await chrome.storage.local.set({ [key]: value });
+    return;
   }
-
-  localStorage.setItem(USAGE_STATS_KEY, JSON.stringify(next));
-  return next;
+  localStorage.setItem(key, JSON.stringify(value));
 }
 
-export function formatCompactTokens(tokens: number): string {
-  const safe = Math.max(0, Math.round(tokens));
-  if (safe >= 1000) {
-    return `${(safe / 1000).toFixed(1).replace(/\.0$/, '')}k`;
-  }
-  return String(safe);
+export async function loadPinnedPromptIds(): Promise<string[]> {
+  const stored = await readLocalSetting<unknown>(PINNED_PROMPT_IDS_KEY, []);
+  if (!Array.isArray(stored)) return [];
+  return Array.from(
+    new Set(stored.filter((id): id is string => typeof id === 'string' && id.length > 0)),
+  );
 }
 
-export function formatUsageFooter(stats: UsageStats): string {
-  if (stats.totalShots <= 0) return '';
-  const onDevicePercentage = Math.round((stats.onDeviceShots / stats.totalShots) * 100);
-  const formattedTokensSaved = formatCompactTokens(stats.tokensSavedOnDevice);
-  return `☕ ${stats.totalShots} shots • ⚡ ${onDevicePercentage}% local (~${formattedTokensSaved} tokens saved)`;
+export async function savePinnedPromptIds(ids: string[]): Promise<void> {
+  const uniqueIds = Array.from(
+    new Set(ids.filter((id) => typeof id === 'string' && id.length > 0)),
+  );
+  await writeLocalSetting(PINNED_PROMPT_IDS_KEY, uniqueIds);
+}
+
+export async function loadLocalOnlyMode(): Promise<boolean> {
+  const stored = await readLocalSetting<unknown>(LOCAL_ONLY_MODE_KEY, false);
+  return stored === true;
+}
+
+export async function saveLocalOnlyMode(enabled: boolean): Promise<void> {
+  await writeLocalSetting(LOCAL_ONLY_MODE_KEY, Boolean(enabled));
 }

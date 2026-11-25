@@ -70,7 +70,7 @@ export function AuthModal({ user, isSyncing, onSyncNow, onClose }: AuthModalProp
 
         {!isFirebaseConfigured ? (
           <p className="rounded-xl bg-amber-50 p-3 text-[12px] text-amber-800">
-            Firebase credentials are not configured in <code className="font-mono">.env</code>. Your prompts are safely stored locally on this browser.
+            Firebase credentials are not configured in <code className="font-mono">.env</code>. Local Gemini Nano 4 works offline—add <code className="font-mono">.env</code> keys to enable Gemini Cloud fallback and Prompt Sync.
           </p>
         ) : user ? (
           <div className="space-y-3">

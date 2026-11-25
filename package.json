@@ -2,7 +2,7 @@
   "name": "espresso-extension",
   "version": "1.0.0",
   "private": true,
-  "description": "Espresso — Instant One-Click Hybrid On-Device & Cloud AI Chrome Extension (Manifest V3)",
+  "description": "Espresso — Instant One-Click Hybrid On-Device & Cloud AI Chrome Extension (Gemini Nano 4 First)",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -14,6 +14,7 @@
     "@mozilla/readability": "^0.6.0",
     "firebase": "^12.5.0",
     "lucide-react": "^0.511.0",
+    "pdfjs-dist": "^6.5.438",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0"

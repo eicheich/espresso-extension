@@ -1,37 +1,42 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { User } from 'firebase/auth';
 import {
+  AlertTriangle,
   ArrowDown,
   ArrowUp,
   CheckCircle2,
   Cpu,
   ExternalLink,
   FileText,
+  FileUp,
   FolderLock,
   Pencil,
+  Pin,
   Play,
   Plus,
   RefreshCw,
-  Search,
   Sparkles,
   Trash2,
   User as UserIcon,
-  X,
 } from 'lucide-react';
 import { isFirebaseConfigured } from './lib/firebase';
 import {
-  buildHybridPrompt,
-  LocalAiWarmupRequiredError,
-  resolveInferenceBadge,
+  CLOUD_INFERENCE_SOURCE,
+  diagnoseLocalAi,
+  isWarmSessionCached,
+  LOCAL_INFERENCE_SOURCE,
+  LocalAiSetupRequiredError,
+  prewarmLocalSession,
   runHybridPrompt,
+  SAFE_ON_DEVICE_TOKEN_LIMIT,
   warmUpLocalModel,
+  type LocalAiDiagnostics,
 } from './lib/ai';
 import {
   ContextExtractionError,
   estimateTokens,
   extractActiveTabContext,
-  getTokenStatus,
-  NANO_TOKEN_LIMIT,
+  extractPdfContextFromFile,
   type ContextErrorCode,
   type PageContext,
 } from './lib/context';
@@ -45,43 +50,55 @@ import {
   type PromptItem,
 } from './lib/prompts';
 import {
-  formatUsageFooter,
-  loadUsageStats,
-  recordUsageShot,
-  type UsageStats,
+  loadLocalOnlyMode,
+  loadPinnedPromptIds,
+  saveLocalOnlyMode,
+  savePinnedPromptIds,
 } from './lib/storage';
 import {
   deleteCloudPrompt,
   saveAllCloudPrompts,
+  saveCloudPinnedPromptIds,
   subscribeToAuth,
+  syncPinnedPromptIdsOnSignIn,
   syncPromptsOnSignIn,
   upsertCloudPrompt,
 } from './lib/sync';
 import { AuthModal } from './components/AuthModal';
+import { NanoSetupGuide } from './components/NanoSetupGuide';
 import { OutputCard } from './components/OutputCard';
 import { PromptFormModal } from './components/PromptFormModal';
 
-type LocalAiStatus = 'idle' | 'warming' | 'ready' | 'fallback';
 type AppView = 'prompts' | 'results';
-type LibraryTab = 'discover' | 'my-prompts';
+type LibraryTab = 'core' | 'custom';
+
+const INITIAL_DIAGNOSTICS: LocalAiDiagnostics = {
+  status: 'flags-required',
+  rawAvailability: 'checking',
+  chromeVersion: null,
+  supportsChromeVersion: true,
+};
 
 export default function App() {
   const [activeView, setActiveView] = useState<AppView>('prompts');
-  const [libraryTab, setLibraryTab] = useState<LibraryTab>('discover');
-  const [searchQuery, setSearchQuery] = useState('');
-  const [selectedCategory, setSelectedCategory] = useState('All');
+  const [libraryTab, setLibraryTab] = useState<LibraryTab>('core');
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
   const [prompts, setPrompts] = useState<PromptItem[]>([]);
-  const [usageStats, setUsageStats] = useState<UsageStats | null>(null);
+  const [pinnedPromptIds, setPinnedPromptIds] = useState<string[]>([]);
+  const [localOnlyMode, setLocalOnlyMode] = useState(false);
   const [context, setContext] = useState<PageContext | null>(null);
   const [contextError, setContextError] = useState<string | null>(null);
   const [contextErrorCode, setContextErrorCode] = useState<ContextErrorCode | null>(null);
   const [refreshingContext, setRefreshingContext] = useState(false);
 
-  const [activePromptTokens, setActivePromptTokens] = useState<number | null>(null);
-  const [localAiStatus, setLocalAiStatus] = useState<LocalAiStatus>('idle');
+  const [diagnostics, setDiagnostics] = useState<LocalAiDiagnostics>(INITIAL_DIAGNOSTICS);
+  const [diagnosticsLoaded, setDiagnosticsLoaded] = useState(false);
+  const [showSetupView, setShowSetupView] = useState(false);
+  const [isPrewarming, setIsPrewarming] = useState(false);
+  const [isWarming, setIsWarming] = useState(false);
   const [downloadProgress, setDownloadProgress] = useState<number | null>(null);
+  const [setupError, setSetupError] = useState<string | null>(null);
 
   const [runningPromptId, setRunningPromptId] = useState<string | null>(null);
   const [outputState, setOutputState] = useState<{
@@ -90,11 +107,12 @@ export default function App() {
     outputText: string;
     inferenceSource: string | undefined;
     notice: string | null;
-    needsLocalWarmup: boolean;
+    needsLocalSetup: boolean;
     elapsedMs: number | null;
     error: string | null;
   } | null>(null);
 
+  const abortControllerRef = useRef<AbortController | null>(null);
   const runStartRef = useRef<number | null>(null);
   const [liveElapsedMs, setLiveElapsedMs] = useState<number | null>(null);
 
@@ -143,6 +161,46 @@ export default function App() {
   const [showAuthModal, setShowAuthModal] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
 
+  const showToast = useCallback((message: string) => {
+    setToastMessage(message);
+    setTimeout(() => {
+      setToastMessage((prev) => (prev === message ? null : prev));
+    }, 2600);
+  }, []);
+
+  const refreshDiagnostics = useCallback(async (): Promise<LocalAiDiagnostics> => {
+    const next = await diagnoseLocalAi();
+    setDiagnostics(next);
+    setDiagnosticsLoaded(true);
+    if (next.status === 'ready') {
+      setSetupError(null);
+      if (!isWarmSessionCached()) {
+        setIsPrewarming(true);
+        void prewarmLocalSession()
+          .catch((err) => {
+            console.warn('[Espresso Local AI] Background prewarm skipped:', err);
+          })
+          .finally(() => {
+            setIsPrewarming(false);
+          });
+      }
+    }
+    return next;
+  }, []);
+
+  const handleManualCheckStatus = async () => {
+    const next = await refreshDiagnostics();
+    if (next.status === 'ready') {
+      showToast('Gemini Nano 4 is ready');
+    } else if (next.status === 'downloadable') {
+      showToast('Chrome flags active — click Download & Enable Nano 4');
+    } else if (next.status === 'downloading') {
+      showToast('Gemini Nano 4 is downloading in Chrome');
+    } else {
+      showToast('Still not detected — enable both flags and relaunch Chrome');
+    }
+  };
+
   const refreshContext = useCallback(async (): Promise<PageContext | null> => {
     setRefreshingContext(true);
     setContextError(null);
@@ -161,17 +219,61 @@ export default function App() {
     }
   }, []);
 
+  const pdfInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleOpenChromeUrl = (url: string) => {
+    if (typeof chrome !== 'undefined' && chrome.tabs?.create) {
+      void chrome.tabs.create({ url });
+    }
+  };
+
   const handleOpenExtensionSettings = () => {
-    if (typeof chrome !== 'undefined' && chrome.tabs?.create && chrome.runtime?.id) {
-      void chrome.tabs.create({ url: `chrome://extensions/?id=${chrome.runtime.id}` });
+    if (typeof chrome !== 'undefined' && chrome.runtime?.id) {
+      handleOpenChromeUrl(`chrome://extensions/?id=${chrome.runtime.id}`);
+    }
+  };
+
+  const handlePdfFileChange = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+
+    setRefreshingContext(true);
+    setContextError(null);
+    setContextErrorCode(null);
+    try {
+      const pdfContext = await extractPdfContextFromFile(file);
+      setContext(pdfContext);
+      showToast(`Loaded ${file.name}`);
+    } catch (err) {
+      setContext(null);
+      setContextError(err instanceof Error ? err.message : 'Unable to extract text from PDF.');
+      setContextErrorCode(err instanceof ContextExtractionError ? err.code : 'PDF_ISOLATED');
+    } finally {
+      setRefreshingContext(false);
     }
   };
 
   useEffect(() => {
     void loadLocalPrompts().then(setPrompts);
-    void loadUsageStats().then(setUsageStats);
+    void loadPinnedPromptIds().then(setPinnedPromptIds);
+    void loadLocalOnlyMode().then(setLocalOnlyMode);
     void refreshContext();
-  }, [refreshContext]);
+    void refreshDiagnostics();
+  }, [refreshContext, refreshDiagnostics]);
+
+  // Auto-poll Chrome download availability while model weights are downloading.
+  useEffect(() => {
+    if (diagnostics.status !== 'downloading') return;
+    const timer = setInterval(() => {
+      void refreshDiagnostics().then((next) => {
+        if (next.status === 'ready') {
+          showToast('Gemini Nano 4 is ready');
+        }
+      });
+    }, 2500);
+    return () => clearInterval(timer);
+  }, [diagnostics.status, refreshDiagnostics, showToast]);
 
   const performCloudSync = useCallback(async (uid: string, localList: PromptItem[]) => {
     setIsSyncing(true);
@@ -179,6 +281,15 @@ export default function App() {
       const merged = await syncPromptsOnSignIn(uid, localList);
       setPrompts(merged);
       await saveLocalPrompts(merged);
+
+      try {
+        const localPinned = await loadPinnedPromptIds();
+        const mergedPinned = await syncPinnedPromptIdsOnSignIn(uid, localPinned);
+        setPinnedPromptIds(mergedPinned);
+        await savePinnedPromptIds(mergedPinned);
+      } catch (pinErr) {
+        console.warn('Pinned prompt sync failed:', pinErr);
+      }
     } catch (err) {
       console.error('Cloud sync failed:', err);
     } finally {
@@ -197,28 +308,38 @@ export default function App() {
   }, [performCloudSync]);
 
   const handleWarmUpLocalAi = async () => {
-    setLocalAiStatus('warming');
+    setIsWarming(true);
     setDownloadProgress(0);
+    setSetupError(null);
     try {
-      await warmUpLocalModel((progress) => setDownloadProgress(progress));
-      setLocalAiStatus('ready');
-    } catch {
-      setLocalAiStatus('fallback');
+      const ready = await warmUpLocalModel((progress) => setDownloadProgress(progress));
+      const nextDiag = await refreshDiagnostics();
+      if (ready || nextDiag.status === 'ready') {
+        showToast('Gemini Nano 4 ready');
+      }
+    } catch (err) {
+      console.warn('[Espresso Local AI]', err);
+      setSetupError(
+        err instanceof Error
+          ? err.message
+          : 'Could not activate Gemini Nano 4. Check Chrome flags and try again.',
+      );
+      await refreshDiagnostics();
     } finally {
+      setIsWarming(false);
       setDownloadProgress(null);
     }
   };
 
-  const showToast = useCallback((message: string) => {
-    setToastMessage(message);
-    setTimeout(() => {
-      setToastMessage((prev) => (prev === message ? null : prev));
-    }, 2600);
-  }, []);
+  const handleStopPrompt = () => {
+    abortControllerRef.current?.abort();
+  };
 
   const handleRunPrompt = async (prompt: PromptItem) => {
     if (runningPromptId !== null) return;
 
+    const controller = new AbortController();
+    abortControllerRef.current = controller;
     const startTime = performance.now();
     runStartRef.current = startTime;
     setLiveElapsedMs(0);
@@ -228,30 +349,36 @@ export default function App() {
     targetTextRef.current = '';
     displayedLenRef.current = 0;
     setDisplayedText('');
+    const prefersLocal =
+      localOnlyMode ||
+      (diagnostics.status === 'ready' &&
+        (context?.tokens ?? 0) <= SAFE_ON_DEVICE_TOKEN_LIMIT);
+
     setOutputState({
       prompt,
       isRunning: true,
       outputText: '',
-      inferenceSource: undefined,
+      inferenceSource: prefersLocal ? LOCAL_INFERENCE_SOURCE : CLOUD_INFERENCE_SOURCE,
       notice: null,
-      needsLocalWarmup: false,
+      needsLocalSetup: false,
       elapsedMs: null,
       error: null,
     });
 
     try {
-      const freshContext = await refreshContext();
+      const freshContext =
+        context?.source === 'pdf-file' ? context : await refreshContext();
       if (!freshContext) {
         throw new Error('Could not extract readable text from the active tab.');
       }
 
-      const combinedTokens = estimateTokens(
-        buildHybridPrompt(prompt.instruction, freshContext.text),
-      );
-      setActivePromptTokens(combinedTokens);
-
       const result = await runHybridPrompt(prompt.instruction, freshContext.text, {
+        localOnly: localOnlyMode,
+        signal: controller.signal,
         onProgress: (progress) => setDownloadProgress(progress),
+        onSourceChange: (source) => {
+          setOutputState((prev) => (prev ? { ...prev, inferenceSource: source } : prev));
+        },
         onChunk: (accumulatedText, inferenceSource) => {
           targetTextRef.current = accumulatedText;
           setOutputState((prev) =>
@@ -267,9 +394,6 @@ export default function App() {
       });
 
       const finalElapsedMs = performance.now() - startTime;
-      const isOnDevice = resolveInferenceBadge(result.inferenceSource).kind === 'on-device';
-      void recordUsageShot(isOnDevice, combinedTokens).then(setUsageStats);
-
       targetTextRef.current = result.text;
       setOutputState({
         prompt,
@@ -277,25 +401,49 @@ export default function App() {
         outputText: result.text,
         inferenceSource: result.inferenceSource,
         notice: result.notice ?? null,
-        needsLocalWarmup: false,
+        needsLocalSetup: false,
         elapsedMs: finalElapsedMs,
         error: null,
       });
     } catch (err) {
+      const isAbort = err instanceof Error && err.name === 'AbortError';
+      if (isAbort) {
+        const finalElapsedMs = performance.now() - startTime;
+        setOutputState((prev) =>
+          prev
+            ? {
+                ...prev,
+                isRunning: false,
+                elapsedMs: prev.outputText ? finalElapsedMs : null,
+                error: null,
+              }
+            : null,
+        );
+        if (!targetTextRef.current) {
+          setActiveView('prompts');
+        }
+        showToast('Stopped');
+        return;
+      }
+
+      const needsSetup = err instanceof LocalAiSetupRequiredError;
+      if (needsSetup) {
+        void refreshDiagnostics();
+      }
       setOutputState({
         prompt,
         isRunning: false,
         outputText: '',
         inferenceSource: undefined,
         notice: null,
-        needsLocalWarmup: err instanceof LocalAiWarmupRequiredError,
+        needsLocalSetup: needsSetup,
         elapsedMs: null,
-        error: err instanceof Error ? err.message : 'Inference failed. Please try again.',
+        error: err instanceof Error ? err.message : 'Local inference failed. Please try again.',
       });
     } finally {
+      abortControllerRef.current = null;
       setRunningPromptId(null);
       setDownloadProgress(null);
-      setActivePromptTokens(null);
     }
   };
 
@@ -334,12 +482,19 @@ export default function App() {
     setShowCreateModal(false);
     setEditingPrompt(null);
     if (!isEditing) {
-      setLibraryTab('my-prompts');
-      setSelectedCategory('All');
-      setSearchQuery('');
+      const nextPinned = [
+        updatedItem.id,
+        ...pinnedPromptIds.filter((id) => id !== updatedItem.id),
+      ];
+      setPinnedPromptIds(nextPinned);
+      void savePinnedPromptIds(nextPinned);
+      if (user) {
+        void saveCloudPinnedPromptIds(user.uid, nextPinned);
+      }
+      setLibraryTab('custom');
       setActiveView('prompts');
     }
-    showToast(isEditing ? 'Prompt updated' : 'Prompt saved to My Prompts');
+    showToast(isEditing ? 'Prompt updated' : 'Prompt saved & pinned');
     await saveLocalPrompts(nextList);
 
     if (user) {
@@ -352,11 +507,43 @@ export default function App() {
       .filter((item) => item.id !== promptId)
       .map((item, idx) => ({ ...item, order: idx }));
     setPrompts(nextList);
+    if (pinnedPromptIds.includes(promptId)) {
+      const nextPinned = pinnedPromptIds.filter((id) => id !== promptId);
+      setPinnedPromptIds(nextPinned);
+      await savePinnedPromptIds(nextPinned);
+      if (user) {
+        void saveCloudPinnedPromptIds(user.uid, nextPinned);
+      }
+    }
     showToast('Prompt deleted');
     await saveLocalPrompts(nextList);
     if (user) {
       void deleteCloudPrompt(user.uid, promptId);
     }
+  };
+
+  const handleTogglePin = async (promptId: string) => {
+    const isPinned = pinnedPromptIds.includes(promptId);
+    const nextPinned = isPinned
+      ? pinnedPromptIds.filter((id) => id !== promptId)
+      : [promptId, ...pinnedPromptIds];
+    setPinnedPromptIds(nextPinned);
+    await savePinnedPromptIds(nextPinned);
+    showToast(isPinned ? 'Unpinned prompt' : 'Pinned for quick access');
+    if (user) {
+      void saveCloudPinnedPromptIds(user.uid, nextPinned);
+    }
+  };
+
+  const handleToggleLocalOnly = async () => {
+    const next = !localOnlyMode;
+    setLocalOnlyMode(next);
+    await saveLocalOnlyMode(next);
+    showToast(
+      next
+        ? 'Local Only mode enabled (100% on-device Nano 4)'
+        : 'Hybrid mode enabled (Nano 4 first, Cloud fallback)',
+    );
   };
 
   const handleReorder = async (promptId: string, direction: 'up' | 'down') => {
@@ -378,35 +565,15 @@ export default function App() {
     () => sortPrompts(prompts.filter((item) => !isBuiltInPrompt(item))),
     [prompts],
   );
-  const activeTabPrompts = libraryTab === 'discover' ? STARTER_PROMPTS : customPrompts;
-  const availableCategories = useMemo(() => {
-    const unique = new Set<string>();
-    for (const item of activeTabPrompts) {
-      if (item.category?.trim()) unique.add(item.category.trim());
-    }
-    return ['All', ...unique];
-  }, [activeTabPrompts]);
+  const pinnedPrompts = useMemo(() => {
+    const byId = new Map<string, PromptItem>();
+    for (const item of STARTER_PROMPTS) byId.set(item.id, item);
+    for (const item of customPrompts) byId.set(item.id, item);
+    return pinnedPromptIds
+      .map((id) => byId.get(id))
+      .filter((item): item is PromptItem => Boolean(item));
+  }, [pinnedPromptIds, customPrompts]);
 
-  const normalizedQuery = searchQuery.trim().toLowerCase();
-  const isFiltered = Boolean(normalizedQuery || selectedCategory !== 'All');
-  const filteredPrompts = useMemo(
-    () =>
-      activeTabPrompts.filter((item) => {
-        const matchesCategory =
-          selectedCategory === 'All' || item.category?.trim() === selectedCategory;
-        if (!matchesCategory) return false;
-        if (!normalizedQuery) return true;
-        return (
-          item.title.toLowerCase().includes(normalizedQuery) ||
-          item.instruction.toLowerCase().includes(normalizedQuery) ||
-          (item.category?.toLowerCase().includes(normalizedQuery) ?? false)
-        );
-      }),
-    [activeTabPrompts, normalizedQuery, selectedCategory],
-  );
-
-  const displayedTokens = activePromptTokens ?? context?.tokens ?? 0;
-  const tokenStatus = getTokenStatus(displayedTokens);
   const isOutputStreaming = Boolean(
     outputState &&
       !outputState.error &&
@@ -422,49 +589,185 @@ export default function App() {
     return () => clearInterval(interval);
   }, [isOutputStreaming]);
 
+  const contextChars = context?.text.trim().length ?? 0;
+  const contextTokens = context?.tokens ?? estimateTokens(context?.text ?? '');
+  const exceedsLocalWindow = contextTokens > SAFE_ON_DEVICE_TOKEN_LIMIT;
+  const budgetPercent = Math.min(
+    100,
+    Math.round((contextTokens / SAFE_ON_DEVICE_TOKEN_LIMIT) * 100),
+  );
+  const nanoPrimaryActive = diagnostics.status === 'ready' && !exceedsLocalWindow;
+  const showOnboarding = showSetupView;
+
+  const renderPromptCard = (
+    prompt: PromptItem,
+    options: {
+      keyPrefix: string;
+      showManageActions: boolean;
+      index?: number;
+      total?: number;
+      showCustomBadge?: boolean;
+    },
+  ) => {
+    const isPinned = pinnedPromptIds.includes(prompt.id);
+    const index = options.index ?? 0;
+    const total = options.total ?? 0;
+
+    return (
+      <article
+        key={`${options.keyPrefix}-${prompt.id}`}
+        className="group rounded-2xl border border-black/8 bg-white p-3 shadow-[0_1px_2px_rgba(0,0,0,0.03)] transition hover:border-black/14"
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-1.5">
+              <h3 className="truncate text-[13px] font-semibold text-[#1D1D1F]">{prompt.title}</h3>
+              {prompt.category && (
+                <span className="rounded-full bg-[#F5F5F7] px-2 py-0.5 text-[10px] font-medium text-neutral-600">
+                  {prompt.category}
+                </span>
+              )}
+              {options.showCustomBadge && !isBuiltInPrompt(prompt) && (
+                <span className="rounded-full bg-[#0071E3]/10 px-2 py-0.5 text-[10px] font-medium text-[#0071E3]">
+                  Custom
+                </span>
+              )}
+            </div>
+            <p className="mt-1 line-clamp-2 text-[11.5px] leading-snug text-neutral-500">
+              {prompt.instruction}
+            </p>
+          </div>
+
+          <div className="flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              onClick={() => void handleTogglePin(prompt.id)}
+              aria-label={isPinned ? `Unpin ${prompt.title}` : `Pin ${prompt.title}`}
+              aria-pressed={isPinned}
+              title={isPinned ? 'Unpin' : 'Pin for quick access'}
+              className={`rounded-full p-1.5 transition ${
+                isPinned
+                  ? 'bg-[#0071E3]/10 text-[#0071E3] hover:bg-[#0071E3]/18'
+                  : 'text-neutral-400 hover:bg-[#F5F5F7] hover:text-neutral-700'
+              }`}
+            >
+              <Pin className={`h-3.5 w-3.5 ${isPinned ? 'fill-current' : ''}`} />
+            </button>
+            <button
+              type="button"
+              disabled={runningPromptId !== null}
+              onClick={() => void handleRunPrompt(prompt)}
+              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#0071E3] px-3 py-1.5 text-[12px] font-medium text-white transition hover:bg-[#0077ED] disabled:opacity-50"
+            >
+              <Play className="h-3 w-3 fill-current" />
+              <span>{runningPromptId === prompt.id ? 'Running' : 'Run'}</span>
+            </button>
+          </div>
+        </div>
+
+        {options.showManageActions && (
+          <div className="mt-2 flex items-center justify-end gap-1 border-t border-black/5 pt-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+            <button
+              type="button"
+              disabled={index === 0}
+              onClick={() => void handleReorder(prompt.id, 'up')}
+              aria-label={`Move ${prompt.title} up`}
+              className="rounded-md p-1 text-neutral-400 transition hover:bg-[#F5F5F7] hover:text-neutral-700 disabled:opacity-30"
+            >
+              <ArrowUp className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              disabled={index === total - 1}
+              onClick={() => void handleReorder(prompt.id, 'down')}
+              aria-label={`Move ${prompt.title} down`}
+              className="rounded-md p-1 text-neutral-400 transition hover:bg-[#F5F5F7] hover:text-neutral-700 disabled:opacity-30"
+            >
+              <ArrowDown className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setEditingPrompt(prompt)}
+              aria-label={`Edit ${prompt.title}`}
+              className="rounded-md p-1 text-neutral-400 transition hover:bg-[#F5F5F7] hover:text-neutral-700"
+            >
+              <Pencil className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleDeletePrompt(prompt.id)}
+              aria-label={`Delete ${prompt.title}`}
+              className="rounded-md p-1 text-neutral-400 transition hover:bg-red-50 hover:text-red-600"
+            >
+              <Trash2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        )}
+      </article>
+    );
+  };
+
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-[420px] flex-col gap-3 px-3.5 py-3.5">
       {/* Header */}
       <header className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
+        <div className="flex min-w-0 items-center gap-2">
           <img
             src="/icons/icon-48.png"
             alt="Espresso logo"
-            className="h-8 w-8 rounded-xl bg-white object-contain p-0.5 shadow-xs ring-1 ring-black/6"
+            className="h-7 w-7 shrink-0 rounded-xl bg-white object-contain p-0.5 shadow-xs ring-1 ring-black/6"
           />
-          <div>
-            <h1 className="text-[15px] font-semibold leading-tight tracking-tight text-[#1D1D1F]">
+          <div className="min-w-0">
+            <h1 className="truncate text-[14.5px] font-semibold leading-tight tracking-tight text-[#1D1D1F]">
               Espresso
             </h1>
-            <p className="text-[11px] text-neutral-500">Your prompts, one click away</p>
+            <p className="truncate text-[10.5px] text-neutral-500">Hybrid &bull; Nano 4 First</p>
           </div>
         </div>
 
-        <div className="flex items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1.5">
           <button
             type="button"
-            onClick={() => void handleWarmUpLocalAi()}
-            disabled={localAiStatus === 'warming'}
-            title="Enable private on-device AI (Chrome Gemini Nano, falls back to Gemini Cloud when needed)"
-            className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1.5 text-[11px] font-medium transition ${
-              localAiStatus === 'ready'
-                ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200'
-                : localAiStatus === 'fallback'
-                  ? 'bg-sky-50 text-sky-700 ring-1 ring-sky-200'
-                  : 'bg-white text-[#1D1D1F] ring-1 ring-black/8 hover:bg-neutral-50'
+            disabled={isWarming}
+            onClick={() => {
+              setShowSetupView((prev) => {
+                const next = !prev;
+                if (next) {
+                  void refreshDiagnostics();
+                }
+                return next;
+              });
+            }}
+            title={
+              diagnostics.status === 'ready'
+                ? 'Gemini Nano 4 Status & Setup Guide'
+                : 'Open Gemini Nano 4 Chrome setup guide'
+            }
+            className={`inline-flex shrink-0 items-center gap-1 whitespace-nowrap rounded-full px-2.5 py-1.5 text-[11px] font-medium transition ${
+              showSetupView
+                ? 'bg-[#0071E3] text-white ring-1 ring-[#0071E3]'
+                : diagnostics.status === 'ready'
+                  ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200 hover:bg-emerald-100/70'
+                  : diagnostics.status === 'downloadable' || diagnostics.status === 'downloading'
+                    ? 'bg-sky-50 text-sky-700 ring-1 ring-sky-200 hover:bg-sky-100/70'
+                    : 'bg-amber-50 text-amber-800 ring-1 ring-amber-200 hover:bg-amber-100/80'
             }`}
           >
-            <Cpu className="h-3.5 w-3.5" />
+            <Cpu className="h-3.5 w-3.5 shrink-0" />
             <span>
-              {localAiStatus === 'warming'
+              {isWarming
                 ? downloadProgress !== null
                   ? `Preparing ${Math.round(downloadProgress * 100)}%`
                   : 'Preparing...'
-                : localAiStatus === 'ready'
-                  ? 'Private AI Ready'
-                  : localAiStatus === 'fallback'
-                    ? 'Cloud AI Active'
-                    : 'Enable Private AI'}
+                : isPrewarming
+                  ? 'Warming...'
+                  : diagnostics.status === 'ready'
+                    ? 'Nano 4 Ready'
+                    : diagnostics.status === 'downloading'
+                      ? 'Downloading...'
+                      : diagnostics.status === 'downloadable'
+                        ? 'Download Nano 4'
+                        : 'Setup Nano 4'}
             </span>
           </button>
 
@@ -473,7 +776,7 @@ export default function App() {
             onClick={() => setShowAuthModal(true)}
             aria-label={user ? `Account & Prompt Sync: ${user.email}` : 'Sign in for Prompt Sync'}
             title={user ? `Synced: ${user.email}` : 'Account & Prompt Sync'}
-            className={`inline-flex items-center gap-1.5 rounded-full text-[11px] font-medium ring-1 transition ${
+            className={`inline-flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full text-[11px] font-medium ring-1 transition ${
               user
                 ? 'relative h-7 w-7 justify-center bg-[#0071E3]/10 text-[#0071E3] ring-[#0071E3]/30'
                 : 'bg-white px-2.5 py-1.5 text-[#1D1D1F] ring-black/8 hover:bg-neutral-50'
@@ -499,46 +802,6 @@ export default function App() {
         </div>
       </header>
 
-      {/* Primary View Switcher: Prompts | Results */}
-      <nav
-        aria-label="Main view"
-        className="grid grid-cols-2 rounded-xl bg-black/5 p-1"
-      >
-        <button
-          type="button"
-          onClick={() => setActiveView('prompts')}
-          className={`rounded-lg py-1.5 text-[12px] font-medium transition ${
-            activeView === 'prompts'
-              ? 'bg-white text-[#1D1D1F] shadow-xs'
-              : 'text-neutral-600 hover:text-[#1D1D1F]'
-          }`}
-        >
-          Prompts
-        </button>
-        <button
-          type="button"
-          onClick={() => setActiveView('results')}
-          className={`inline-flex items-center justify-center gap-1.5 rounded-lg py-1.5 text-[12px] font-medium transition ${
-            activeView === 'results'
-              ? 'bg-white text-[#1D1D1F] shadow-xs'
-              : 'text-neutral-600 hover:text-[#1D1D1F]'
-          }`}
-        >
-          <span>Results</span>
-          {outputState && (
-            <span
-              className={`h-1.5 w-1.5 rounded-full ${
-                isOutputStreaming
-                  ? 'animate-pulse bg-[#0071E3]'
-                  : outputState.error
-                    ? 'bg-red-500'
-                    : 'bg-emerald-500'
-              }`}
-            />
-          )}
-        </button>
-      </nav>
-
       {toastMessage && (
         <div
           role="status"
@@ -549,393 +812,466 @@ export default function App() {
         </div>
       )}
 
-      {!isFirebaseConfigured && (
-        <div className="rounded-xl border border-amber-200 bg-amber-50/90 px-3 py-2 text-[11px] leading-relaxed text-amber-800">
-          Firebase is not configured yet. Add your <code className="font-mono">.env</code> keys and rebuild to enable AI execution and Cloud Sync.
-        </div>
-      )}
-
-      {activeView === 'results' ? (
-        outputState ? (
-          <OutputCard
-            promptTitle={outputState.prompt.title}
-            pageTitle={context?.pageTitle}
-            isRunning={isOutputStreaming}
-            downloadProgress={downloadProgress}
-            outputText={displayedText}
-            inferenceSource={outputState.inferenceSource}
-            notice={outputState.notice}
-            needsLocalWarmup={outputState.needsLocalWarmup}
-            isWarmingLocalAi={localAiStatus === 'warming'}
-            elapsedMs={outputState.elapsedMs ?? liveElapsedMs}
-            error={outputState.error}
-            onWarmUpLocalAi={() => void handleWarmUpLocalAi()}
-            onRegenerate={() => void handleRunPrompt(outputState.prompt)}
-            onBack={() => setActiveView('prompts')}
-          />
-        ) : (
-          <section className="rounded-2xl border border-dashed border-black/12 bg-white/80 p-6 text-center">
-            <Sparkles className="mx-auto h-5 w-5 text-neutral-400" />
-            <p className="mt-2 text-[13px] font-medium text-[#1D1D1F]">No results yet</p>
-            <p className="mt-1 text-[11.5px] text-neutral-500">
-              Run any prompt on the current webpage to view its answer here.
-            </p>
+      {showOnboarding ? (
+        <NanoSetupGuide
+          diagnostics={diagnostics}
+          isWarming={isWarming}
+          isPrewarming={isPrewarming}
+          isWarmCached={isWarmSessionCached()}
+          downloadProgress={downloadProgress}
+          setupError={setupError}
+          onCheckStatus={() => void handleManualCheckStatus()}
+          onDownloadModel={() => void handleWarmUpLocalAi()}
+          onOpenChromeUrl={handleOpenChromeUrl}
+          onSkip={() => setShowSetupView(false)}
+        />
+      ) : (
+        <>
+          {/* Primary View Switcher: Prompts | Results */}
+          <nav aria-label="Main view" className="grid grid-cols-2 rounded-xl bg-black/5 p-1">
             <button
               type="button"
               onClick={() => setActiveView('prompts')}
-              className="mt-3 rounded-full bg-[#0071E3] px-4 py-1.5 text-[12px] font-medium text-white transition hover:bg-[#0077ED]"
+              className={`rounded-lg py-1.5 text-[12px] font-medium transition ${
+                activeView === 'prompts'
+                  ? 'bg-white text-[#1D1D1F] shadow-xs'
+                  : 'text-neutral-600 hover:text-[#1D1D1F]'
+              }`}
             >
-              Browse Prompts
+              Prompts
             </button>
-          </section>
-        )
-      ) : (
-        <>
-          {/* Webpage Context Card */}
-          <section className="rounded-2xl border border-black/8 bg-white p-3 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
-            <div className="flex items-center justify-between gap-2">
-              <span
-                className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
-                  context?.source === 'selection'
-                    ? 'bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200'
-                    : 'bg-[#F5F5F7] text-neutral-700 ring-1 ring-black/6'
+            <button
+              type="button"
+              onClick={() => setActiveView('results')}
+              className={`inline-flex items-center justify-center gap-1.5 rounded-lg py-1.5 text-[12px] font-medium transition ${
+                activeView === 'results'
+                  ? 'bg-white text-[#1D1D1F] shadow-xs'
+                  : 'text-neutral-600 hover:text-[#1D1D1F]'
+              }`}
+            >
+              <span>Results</span>
+              {outputState && (
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    isOutputStreaming
+                      ? 'animate-pulse bg-[#0071E3]'
+                      : outputState.error
+                        ? 'bg-red-500'
+                        : 'bg-emerald-500'
+                  }`}
+                />
+              )}
+            </button>
+          </nav>
+
+          {/* Compact Inference Mode Switcher: Hybrid (Nano 4 First) | Local Only */}
+          <div className="flex items-center justify-between gap-2 rounded-xl border border-black/6 bg-white/80 px-2.5 py-1.5">
+            <span className="truncate text-[11px] font-medium text-neutral-600">
+              {localOnlyMode
+                ? 'Locked 100% on-device'
+                : 'Smart hybrid mode'}
+            </span>
+            <div
+              role="group"
+              aria-label="Inference mode"
+              className="inline-flex shrink-0 rounded-lg bg-black/5 p-0.5"
+            >
+              <button
+                type="button"
+                aria-pressed={!localOnlyMode}
+                onClick={() => localOnlyMode && void handleToggleLocalOnly()}
+                className={`whitespace-nowrap rounded-md px-2 py-0.5 text-[10.5px] font-medium transition ${
+                  !localOnlyMode
+                    ? 'bg-white text-[#1D1D1F] shadow-xs'
+                    : 'text-neutral-500 hover:text-[#1D1D1F]'
                 }`}
               >
-                <FileText className="h-3 w-3" />
-                <span>
-                  {context?.source === 'selection'
-                    ? 'Running on selected text'
-                    : 'Running on this page'}
-                </span>
-              </span>
-
+                Hybrid
+              </button>
               <button
                 type="button"
-                onClick={() => void refreshContext()}
-                disabled={refreshingContext}
-                className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium text-[#0071E3] transition hover:bg-[#0071E3]/8 disabled:opacity-50"
+                aria-pressed={localOnlyMode}
+                onClick={() => !localOnlyMode && void handleToggleLocalOnly()}
+                className={`whitespace-nowrap rounded-md px-2 py-0.5 text-[10.5px] font-medium transition ${
+                  localOnlyMode
+                    ? 'bg-emerald-600 text-white shadow-xs'
+                    : 'text-neutral-500 hover:text-[#1D1D1F]'
+                }`}
               >
-                <RefreshCw className={`h-3 w-3 ${refreshingContext ? 'animate-spin' : ''}`} />
-                <span>Refresh</span>
+                Local Only
               </button>
             </div>
+          </div>
 
-            <p className="mt-1.5 truncate text-[12.5px] font-medium text-[#1D1D1F]">
-              {context?.pageTitle ??
-                (contextErrorCode === 'FILE_ACCESS_REQUIRED'
-                  ? 'Local file permission needed'
-                  : 'Page content unavailable')}
-            </p>
+          {diagnosticsLoaded && diagnostics.status !== 'ready' && (
+            <div className="flex items-start justify-between gap-2.5 rounded-2xl border border-amber-200 bg-amber-50/90 px-3 py-2.5 text-[11.5px] text-amber-900">
+              <div className="flex items-start gap-2">
+                <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                <div>
+                  <p className="font-semibold leading-tight">
+                    {localOnlyMode
+                      ? 'Gemini Nano 4 not installed yet'
+                      : 'Running on Gemini Cloud fallback'}
+                  </p>
+                  <p className="mt-0.5 text-[11px] leading-snug text-amber-800">
+                    {localOnlyMode
+                      ? 'Local Only mode requires Chrome Gemini Nano 4 to be enabled.'
+                      : diagnostics.status === 'downloadable'
+                        ? 'Download Nano 4 (~1.5–2 GB) for faster, private offline AI.'
+                        : 'Enable Gemini Nano 4 in Chrome for primary on-device AI.'}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowSetupView(true);
+                  void refreshDiagnostics();
+                }}
+                className="shrink-0 whitespace-nowrap rounded-full bg-[#1D1D1F] px-2.5 py-1.5 text-[11px] font-medium text-white transition hover:bg-black"
+              >
+                {diagnostics.status === 'downloadable' ? 'Download' : 'Setup Nano 4'}
+              </button>
+            </div>
+          )}
 
-            {contextErrorCode === 'FILE_ACCESS_REQUIRED' ? (
-              <div className="mt-2 space-y-2 rounded-xl border border-amber-200 bg-amber-50/80 p-2.5 text-[11px] text-amber-900">
-                <div className="flex items-start gap-2">
-                  <FolderLock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-700" />
-                  <div className="space-y-1">
-                    <p className="font-semibold">Allow access to local files (file://)</p>
-                    <ol className="list-decimal space-y-0.5 pl-4 text-amber-800">
-                      <li>Click Open Extension Settings</li>
-                      <li>Toggle on &ldquo;Allow access to file URLs&rdquo;</li>
-                      <li>Return here and click Refresh</li>
-                    </ol>
+          {activeView === 'results' ? (
+            outputState ? (
+              <OutputCard
+                promptTitle={outputState.prompt.title}
+                pageTitle={context?.pageTitle}
+                isRunning={isOutputStreaming}
+                downloadProgress={downloadProgress}
+                outputText={displayedText}
+                inferenceSource={outputState.inferenceSource}
+                notice={outputState.notice}
+                needsLocalSetup={outputState.needsLocalSetup}
+                elapsedMs={outputState.elapsedMs ?? liveElapsedMs}
+                error={outputState.error}
+                onOpenSetup={() => {
+                  setShowSetupView(true);
+                  setActiveView('prompts');
+                  void refreshDiagnostics();
+                }}
+                onStop={handleStopPrompt}
+                onRegenerate={() => void handleRunPrompt(outputState.prompt)}
+                onBack={() => setActiveView('prompts')}
+              />
+            ) : (
+              <section className="rounded-2xl border border-dashed border-black/12 bg-white/80 p-6 text-center">
+                <Sparkles className="mx-auto h-5 w-5 text-neutral-400" />
+                <p className="mt-2 text-[13px] font-medium text-[#1D1D1F]">No results yet</p>
+                <p className="mt-1 text-[11.5px] text-neutral-500">
+                  Run any prompt on the active page or an offline PDF to view results here.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setActiveView('prompts')}
+                  className="mt-3 rounded-full bg-[#0071E3] px-4 py-1.5 text-[12px] font-medium text-white transition hover:bg-[#0077ED]"
+                >
+                  Browse Prompts
+                </button>
+              </section>
+            )
+          ) : (
+            <>
+              {/* Webpage / Offline PDF Context Card */}
+              <section className="rounded-2xl border border-black/8 bg-white p-3 shadow-[0_1px_3px_rgba(0,0,0,0.04)]">
+                <input
+                  ref={pdfInputRef}
+                  type="file"
+                  accept=".pdf,application/pdf"
+                  onChange={(e) => void handlePdfFileChange(e)}
+                  className="hidden"
+                />
+                <div className="flex items-center justify-between gap-2">
+                  <span
+                    className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${
+                      context?.source === 'selection'
+                        ? 'bg-indigo-50 text-indigo-700 ring-1 ring-indigo-200'
+                        : context?.source === 'pdf-file'
+                          ? 'bg-amber-50 text-amber-800 ring-1 ring-amber-200'
+                          : 'bg-[#F5F5F7] text-neutral-700 ring-1 ring-black/6'
+                    }`}
+                  >
+                    <FileText className="h-3 w-3" />
+                    <span>
+                      {context?.source === 'selection'
+                        ? 'Selected text'
+                        : context?.source === 'pdf-file'
+                          ? 'Local PDF loaded'
+                          : 'Active page'}
+                    </span>
+                  </span>
+
+                  <div className="flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => pdfInputRef.current?.click()}
+                      disabled={refreshingContext}
+                      title="Open a local PDF file directly (works 100% offline)"
+                      className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium text-neutral-600 transition hover:bg-neutral-100 disabled:opacity-50"
+                    >
+                      <FileUp className="h-3 w-3" />
+                      <span>Open PDF</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void refreshContext()}
+                      disabled={refreshingContext}
+                      title={
+                        context?.source === 'pdf-file'
+                          ? 'Switch back to active tab'
+                          : 'Refresh active tab'
+                      }
+                      className="inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium text-[#0071E3] transition hover:bg-[#0071E3]/8 disabled:opacity-50"
+                    >
+                      <RefreshCw
+                        className={`h-3 w-3 ${refreshingContext ? 'animate-spin' : ''}`}
+                      />
+                      <span>{context?.source === 'pdf-file' ? 'Use Tab' : 'Refresh'}</span>
+                    </button>
                   </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={handleOpenExtensionSettings}
-                  className="inline-flex w-full items-center justify-center gap-1.5 rounded-full bg-[#1D1D1F] px-3 py-1.5 text-[11.5px] font-medium text-white transition hover:bg-black"
-                >
-                  <span>Open Extension Settings</span>
-                  <ExternalLink className="h-3 w-3" />
-                </button>
-              </div>
-            ) : contextErrorCode === 'PDF_ISOLATED' && contextError ? (
-              <div className="mt-2 flex items-start justify-between gap-2 rounded-xl border border-sky-200/80 bg-sky-50/70 px-2.5 py-2 text-[11px] leading-snug text-sky-900">
-                <span>{contextError}</span>
-                <button
-                  type="button"
-                  onClick={() => void refreshContext()}
-                  className="shrink-0 font-semibold text-sky-800 underline"
-                >
-                  Refresh
-                </button>
-              </div>
-            ) : contextError ? (
-              <div className="mt-2 flex items-center justify-between gap-2 rounded-xl bg-amber-50 px-2.5 py-2 text-[11px] text-amber-800">
-                <span>{contextError}</span>
-                <button
-                  type="button"
-                  onClick={() => void refreshContext()}
-                  className="shrink-0 font-semibold text-amber-900 underline"
-                >
-                  Retry
-                </button>
-              </div>
-            ) : (
-              <div className="mt-2">
-                <div className="mb-1 flex items-center justify-between text-[11px]">
-                  <span
-                    className={
-                      tokenStatus.exceedsNano
-                        ? 'font-medium text-sky-700'
-                        : 'font-medium text-emerald-700'
-                    }
-                  >
-                    {tokenStatus.exceedsNano
-                      ? 'Uses Cloud AI (long page)'
-                      : 'Private AI ready'}
-                  </span>
-                  <span
-                    title={`Approximate payload size (${tokenStatus.tokens.toLocaleString()} of ${NANO_TOKEN_LIMIT.toLocaleString()} local Gemini Nano tokens)`}
-                    className="tabular-nums text-neutral-400"
-                  >
-                    ~{tokenStatus.tokens.toLocaleString()} / {NANO_TOKEN_LIMIT.toLocaleString()} tokens
-                  </span>
-                </div>
-                <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#F5F5F7]">
-                  <div
-                    className={`h-full rounded-full transition-all duration-300 ${
-                      tokenStatus.exceedsNano ? 'bg-sky-500' : 'bg-emerald-500'
-                    }`}
-                    style={{ width: `${tokenStatus.percent}%` }}
-                  />
-                </div>
-              </div>
-            )}
-          </section>
 
-          {/* Prompt Library */}
-          <section className="flex flex-col gap-2">
-            <div className="flex items-center justify-between gap-2">
-              <div
-                role="tablist"
-                aria-label="Prompt library tabs"
-                className="inline-flex rounded-xl bg-black/5 p-0.5"
-              >
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={libraryTab === 'discover'}
-                  onClick={() => {
-                    setLibraryTab('discover');
-                    setSelectedCategory('All');
-                  }}
-                  className={`rounded-lg px-2.5 py-1 text-[11.5px] font-medium transition ${
-                    libraryTab === 'discover'
-                      ? 'bg-white text-[#1D1D1F] shadow-xs'
-                      : 'text-neutral-600 hover:text-[#1D1D1F]'
-                  }`}
-                >
-                  Discover
-                </button>
-                <button
-                  type="button"
-                  role="tab"
-                  aria-selected={libraryTab === 'my-prompts'}
-                  onClick={() => {
-                    setLibraryTab('my-prompts');
-                    setSelectedCategory('All');
-                  }}
-                  className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11.5px] font-medium transition ${
-                    libraryTab === 'my-prompts'
-                      ? 'bg-white text-[#1D1D1F] shadow-xs'
-                      : 'text-neutral-600 hover:text-[#1D1D1F]'
-                  }`}
-                >
-                  <span>My Prompts</span>
-                  <span className="rounded-full bg-black/6 px-1.5 text-[10px] text-neutral-600">
-                    {customPrompts.length}
-                  </span>
-                </button>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setShowCreateModal(true)}
-                className="inline-flex items-center gap-1 rounded-full bg-[#1D1D1F] px-3 py-1.5 text-[11px] font-medium text-white transition hover:bg-black"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                <span>New Prompt</span>
-              </button>
-            </div>
-
-            {/* Search & Category Filters */}
-            <div className="space-y-1.5">
-              <div className="relative">
-                <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-neutral-400" />
-                <input
-                  type="search"
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder="Search prompts..."
-                  aria-label="Search prompts"
-                  className="w-full rounded-xl border border-black/8 bg-white py-1.5 pr-7 pl-8 text-[12px] text-[#1D1D1F] placeholder:text-neutral-400 outline-none transition focus:border-[#0071E3]"
-                />
-                {searchQuery && (
-                  <button
-                    type="button"
-                    onClick={() => setSearchQuery('')}
-                    aria-label="Clear search"
-                    className="absolute top-1/2 right-2 -translate-y-1/2 rounded-full p-0.5 text-neutral-400 hover:bg-neutral-100 hover:text-neutral-700"
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                )}
-              </div>
-
-              {availableCategories.length > 1 && (
-                <div className="flex flex-wrap gap-1">
-                  {availableCategories.map((category) => (
-                    <button
-                      key={category}
-                      type="button"
-                      onClick={() => setSelectedCategory(category)}
-                      className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium transition ${
-                        selectedCategory === category
-                          ? 'bg-[#1D1D1F] text-white'
-                          : 'bg-white text-neutral-600 ring-1 ring-black/8 hover:bg-neutral-50'
-                      }`}
-                    >
-                      {category}
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Account Sync nudge inside My Prompts when signed out */}
-            {libraryTab === 'my-prompts' && !user && isFirebaseConfigured && (
-              <button
-                type="button"
-                onClick={() => setShowAuthModal(true)}
-                className="flex w-full items-center justify-between rounded-xl border border-black/6 bg-white/80 px-3 py-2 text-left text-[11px] text-neutral-600 transition hover:border-[#0071E3]/30 hover:text-[#0071E3]"
-              >
-                <span>Sign in to back up &amp; sync your custom prompts across devices</span>
-                <UserIcon className="h-3.5 w-3.5 shrink-0" />
-              </button>
-            )}
-
-            {/* Prompt List / Empty States */}
-            {libraryTab === 'my-prompts' && customPrompts.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-black/12 bg-white/80 p-5 text-center">
-                <p className="text-[13px] font-medium text-[#1D1D1F]">No custom prompts yet</p>
-                <p className="mt-1 text-[11.5px] text-neutral-500">
-                  Save your favorite instructions to run them on any page in one click.
+                <p className="mt-1.5 truncate text-[12.5px] font-medium text-[#1D1D1F]">
+                  {context?.pageTitle ??
+                    (contextErrorCode === 'FILE_ACCESS_REQUIRED'
+                      ? 'Local file permission needed'
+                      : 'Page content unavailable')}
                 </p>
-                <button
-                  type="button"
-                  onClick={() => setShowCreateModal(true)}
-                  className="mt-3 inline-flex items-center gap-1 rounded-full bg-[#0071E3] px-3.5 py-1.5 text-[12px] font-medium text-white transition hover:bg-[#0077ED]"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  <span>Create Your First Prompt</span>
-                </button>
-              </div>
-            ) : filteredPrompts.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-black/12 bg-white/80 p-5 text-center">
-                <p className="text-[12.5px] font-medium text-[#1D1D1F]">
-                  No prompts match your filter
-                </p>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSearchQuery('');
-                    setSelectedCategory('All');
-                  }}
-                  className="mt-2 text-[11.5px] font-medium text-[#0071E3] hover:underline"
-                >
-                  Clear filters
-                </button>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-2 pb-4">
-                {filteredPrompts.map((prompt, index) => (
-                  <article
-                    key={prompt.id}
-                    className="group rounded-2xl border border-black/8 bg-white p-3 shadow-[0_1px_2px_rgba(0,0,0,0.03)] transition hover:border-black/14"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <h3 className="truncate text-[13px] font-semibold text-[#1D1D1F]">
-                            {prompt.title}
-                          </h3>
-                          {prompt.category && (
-                            <span className="rounded-full bg-[#F5F5F7] px-2 py-0.5 text-[10px] font-medium text-neutral-600">
-                              {prompt.category}
-                            </span>
-                          )}
-                        </div>
-                        <p className="mt-1 line-clamp-2 text-[11.5px] leading-snug text-neutral-500">
-                          {prompt.instruction}
-                        </p>
+
+                {contextErrorCode === 'FILE_ACCESS_REQUIRED' ? (
+                  <div className="mt-2 space-y-2 rounded-xl border border-amber-200 bg-amber-50/80 p-2.5 text-[11px] text-amber-900">
+                    <div className="flex items-start gap-2">
+                      <FolderLock className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-700" />
+                      <div className="space-y-1">
+                        <p className="font-semibold">Allow access to local files (file://)</p>
+                        <ol className="list-decimal space-y-0.5 pl-4 text-amber-800">
+                          <li>Click Open Extension Settings</li>
+                          <li>Toggle on &ldquo;Allow access to file URLs&rdquo;</li>
+                          <li>Return here and click Refresh</li>
+                        </ol>
                       </div>
-
+                    </div>
+                    <div className="flex gap-1.5">
                       <button
                         type="button"
-                        disabled={runningPromptId !== null}
-                        onClick={() => void handleRunPrompt(prompt)}
-                        className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[#0071E3] px-3 py-1.5 text-[12px] font-medium text-white transition hover:bg-[#0077ED] disabled:opacity-50"
+                        onClick={handleOpenExtensionSettings}
+                        className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-full bg-[#1D1D1F] px-3 py-1.5 text-[11.5px] font-medium text-white transition hover:bg-black"
                       >
-                        <Play className="h-3 w-3 fill-current" />
-                        <span>{runningPromptId === prompt.id ? 'Running' : 'Run'}</span>
+                        <span>Open Extension Settings</span>
+                        <ExternalLink className="h-3 w-3" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => pdfInputRef.current?.click()}
+                        className="inline-flex items-center justify-center gap-1 rounded-full bg-white px-3 py-1.5 text-[11.5px] font-medium text-[#1D1D1F] ring-1 ring-black/12 transition hover:bg-neutral-50"
+                      >
+                        <FileUp className="h-3 w-3" />
+                        <span>Open PDF</span>
                       </button>
                     </div>
+                  </div>
+                ) : contextErrorCode === 'PDF_ISOLATED' && contextError ? (
+                  <div className="mt-2 space-y-2 rounded-xl border border-sky-200/80 bg-sky-50/70 px-2.5 py-2 text-[11px] leading-snug text-sky-900">
+                    <p>{contextError}</p>
+                    <div className="flex items-center justify-end gap-2">
+                      <button
+                        type="button"
+                        onClick={() => pdfInputRef.current?.click()}
+                        className="inline-flex items-center gap-1 rounded-full bg-white px-2.5 py-1 font-medium text-sky-900 ring-1 ring-sky-200 hover:bg-sky-50"
+                      >
+                        <FileUp className="h-3 w-3" />
+                        <span>Open PDF File</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => void refreshContext()}
+                        className="font-semibold text-sky-800 underline"
+                      >
+                        Refresh
+                      </button>
+                    </div>
+                  </div>
+                ) : contextError ? (
+                  <div className="mt-2 flex items-center justify-between gap-2 rounded-xl bg-amber-50 px-2.5 py-2 text-[11px] text-amber-800">
+                    <span>{contextError}</span>
+                    <button
+                      type="button"
+                      onClick={() => void refreshContext()}
+                      className="shrink-0 font-semibold text-amber-900 underline"
+                    >
+                      Retry
+                    </button>
+                  </div>
+                ) : (
+                  <div className="mt-2">
+                    <div className="mb-1 flex items-center justify-between text-[11px]">
+                      <span
+                        className={
+                          localOnlyMode || nanoPrimaryActive
+                            ? 'font-medium text-emerald-700'
+                            : 'font-medium text-sky-700'
+                        }
+                      >
+                        {localOnlyMode
+                          ? exceedsLocalWindow
+                            ? 'Local Only — primary ~4,800 chars (Nano 4)'
+                            : 'Local Only (Gemini Nano 4)'
+                          : nanoPrimaryActive
+                            ? 'Routes to Gemini Nano 4 (On-Device)'
+                            : exceedsLocalWindow
+                              ? 'Routes to Gemini Cloud (long document)'
+                              : 'Routes to Gemini Cloud (Nano 4 not enabled)'}
+                      </span>
+                      <span
+                        title={`Estimated ${contextTokens.toLocaleString()} tokens (${contextChars.toLocaleString()} chars)`}
+                        className="tabular-nums text-neutral-400"
+                      >
+                        ~{contextTokens.toLocaleString()} tokens
+                      </span>
+                    </div>
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-[#F5F5F7]">
+                      <div
+                        className={`h-full rounded-full transition-all duration-300 ${
+                          localOnlyMode || nanoPrimaryActive ? 'bg-emerald-500' : 'bg-sky-500'
+                        }`}
+                        style={{ width: `${budgetPercent}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+              </section>
 
-                    {libraryTab === 'my-prompts' && (
-                      <div className="mt-2 flex items-center justify-end gap-1 border-t border-black/5 pt-1.5 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                        {!isFiltered && (
-                          <>
-                            <button
-                              type="button"
-                              disabled={index === 0}
-                              onClick={() => void handleReorder(prompt.id, 'up')}
-                              aria-label={`Move ${prompt.title} up`}
-                              className="rounded-md p-1 text-neutral-400 transition hover:bg-[#F5F5F7] hover:text-neutral-700 disabled:opacity-30"
-                            >
-                              <ArrowUp className="h-3.5 w-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              disabled={index === filteredPrompts.length - 1}
-                              onClick={() => void handleReorder(prompt.id, 'down')}
-                              aria-label={`Move ${prompt.title} down`}
-                              className="rounded-md p-1 text-neutral-400 transition hover:bg-[#F5F5F7] hover:text-neutral-700 disabled:opacity-30"
-                            >
-                              <ArrowDown className="h-3.5 w-3.5" />
-                            </button>
-                          </>
+              {/* Minimalist Prompt Library */}
+              <section className="flex flex-col gap-2 pb-3">
+                <div className="flex items-center justify-between gap-2">
+                  <div
+                    role="tablist"
+                    aria-label="Prompt library tabs"
+                    className="inline-flex rounded-xl bg-black/5 p-0.5"
+                  >
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={libraryTab === 'core'}
+                      onClick={() => setLibraryTab('core')}
+                      className={`rounded-lg px-2.5 py-1 text-[11.5px] font-medium transition ${
+                        libraryTab === 'core'
+                          ? 'bg-white text-[#1D1D1F] shadow-xs'
+                          : 'text-neutral-600 hover:text-[#1D1D1F]'
+                      }`}
+                    >
+                      Core (4)
+                    </button>
+                    <button
+                      type="button"
+                      role="tab"
+                      aria-selected={libraryTab === 'custom'}
+                      onClick={() => setLibraryTab('custom')}
+                      className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-[11.5px] font-medium transition ${
+                        libraryTab === 'custom'
+                          ? 'bg-white text-[#1D1D1F] shadow-xs'
+                          : 'text-neutral-600 hover:text-[#1D1D1F]'
+                      }`}
+                    >
+                      <span>Custom</span>
+                      <span className="rounded-full bg-black/6 px-1.5 text-[10px] text-neutral-600">
+                        {customPrompts.length}
+                      </span>
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => setShowCreateModal(true)}
+                    className="inline-flex items-center gap-1 rounded-full bg-[#1D1D1F] px-3 py-1.5 text-[11px] font-medium text-white transition hover:bg-black"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>New Prompt</span>
+                  </button>
+                </div>
+
+                {libraryTab === 'core' ? (
+                  <div className="flex flex-col gap-2">
+                    {pinnedPrompts.length > 0 && (
+                      <div className="mb-1 flex flex-col gap-2">
+                        <div className="flex items-center justify-between px-0.5">
+                          <span className="inline-flex items-center gap-1 text-[11px] font-semibold tracking-tight text-[#1D1D1F]">
+                            <Pin className="h-3 w-3 fill-[#0071E3] text-[#0071E3]" />
+                            <span>Pinned</span>
+                          </span>
+                          <span className="text-[10.5px] text-neutral-400">
+                            Quick access ({pinnedPrompts.length})
+                          </span>
+                        </div>
+                        {pinnedPrompts.map((prompt) =>
+                          renderPromptCard(prompt, {
+                            keyPrefix: 'pinned',
+                            showManageActions: false,
+                            showCustomBadge: true,
+                          }),
                         )}
-                        <button
-                          type="button"
-                          onClick={() => setEditingPrompt(prompt)}
-                          aria-label={`Edit ${prompt.title}`}
-                          className="rounded-md p-1 text-neutral-400 transition hover:bg-[#F5F5F7] hover:text-neutral-700"
-                        >
-                          <Pencil className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => void handleDeletePrompt(prompt.id)}
-                          aria-label={`Delete ${prompt.title}`}
-                          className="rounded-md p-1 text-neutral-400 transition hover:bg-red-50 hover:text-red-600"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
+                        <div className="pt-1 text-[11px] font-semibold tracking-tight text-neutral-500">
+                          Core Prompts
+                        </div>
                       </div>
                     )}
-                  </article>
-                ))}
-              </div>
-            )}
-          </section>
-        </>
-      )}
 
-      {usageStats && usageStats.totalShots > 0 && (
-        <footer className="mt-auto border-t border-black/5 pt-2.5 pb-1 text-center text-[11px] text-neutral-500">
-          {formatUsageFooter(usageStats)}
-        </footer>
+                    {STARTER_PROMPTS.map((prompt, index) =>
+                      renderPromptCard(prompt, {
+                        keyPrefix: 'core',
+                        showManageActions: false,
+                        index,
+                        total: STARTER_PROMPTS.length,
+                      }),
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-2">
+                    {!user && isFirebaseConfigured && (
+                      <button
+                        type="button"
+                        onClick={() => setShowAuthModal(true)}
+                        className="flex w-full items-center justify-between rounded-xl border border-black/6 bg-white/80 px-3 py-2 text-left text-[11px] text-neutral-600 transition hover:border-[#0071E3]/30 hover:text-[#0071E3]"
+                      >
+                        <span>Sign in to sync custom prompts across devices</span>
+                        <UserIcon className="h-3.5 w-3.5 shrink-0" />
+                      </button>
+                    )}
+
+                    {customPrompts.length === 0 ? (
+                      <div className="rounded-2xl border border-dashed border-black/12 bg-white/80 p-5 text-center">
+                        <p className="text-[13px] font-medium text-[#1D1D1F]">No custom prompts yet</p>
+                        <p className="mt-1 text-[11.5px] text-neutral-500">
+                          Save your favorite local instructions and pin them for 1-click access.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => setShowCreateModal(true)}
+                          className="mt-3 inline-flex items-center gap-1 rounded-full bg-[#0071E3] px-3.5 py-1.5 text-[12px] font-medium text-white transition hover:bg-[#0077ED]"
+                        >
+                          <Plus className="h-3.5 w-3.5" />
+                          <span>Create Prompt</span>
+                        </button>
+                      </div>
+                    ) : (
+                      customPrompts.map((prompt, index) =>
+                        renderPromptCard(prompt, {
+                          keyPrefix: 'custom',
+                          showManageActions: true,
+                          index,
+                          total: customPrompts.length,
+                        }),
+                      )
+                    )}
+                  </div>
+                )}
+              </section>
+            </>
+          )}
+        </>
       )}
 
       {(showCreateModal || editingPrompt) && (

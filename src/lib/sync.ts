@@ -5,7 +5,7 @@ import {
   signOut,
   type User,
 } from 'firebase/auth';
-import { collection, deleteDoc, doc, getDocs, setDoc, writeBatch } from 'firebase/firestore';
+import { collection, deleteDoc, doc, getDoc, getDocs, setDoc, writeBatch } from 'firebase/firestore';
 import { auth, db } from './firebase';
 import { sortPrompts, type PromptItem } from './prompts';
 
@@ -114,6 +114,41 @@ export async function saveAllCloudPrompts(uid: string, prompts: PromptItem[]): P
   await batch.commit();
 }
 
+function userProfileDoc(uid: string) {
+  if (!db) {
+    throw new Error('Firebase Firestore is not configured.');
+  }
+  return doc(db, 'users', uid);
+}
+
+export async function syncPinnedPromptIdsOnSignIn(
+  uid: string,
+  localPinnedIds: string[],
+): Promise<string[]> {
+  if (!db) return localPinnedIds;
+
+  const userRef = userProfileDoc(uid);
+  const snap = await getDoc(userRef);
+  const rawCloud = snap.exists() ? snap.data()?.pinnedPromptIds : undefined;
+  const cloudPinnedIds = Array.isArray(rawCloud)
+    ? rawCloud.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : [];
+
+  const merged = Array.from(new Set([...localPinnedIds, ...cloudPinnedIds]));
+  const cloudMatchesMerged =
+    merged.length === cloudPinnedIds.length && merged.every((id, idx) => id === cloudPinnedIds[idx]);
+  if (!cloudMatchesMerged) {
+    await setDoc(userRef, { pinnedPromptIds: merged, updatedAt: Date.now() }, { merge: true });
+  }
+  return merged;
+}
+
+export async function saveCloudPinnedPromptIds(uid: string, pinnedIds: string[]): Promise<void> {
+  if (!db) return;
+  const uniqueIds = Array.from(new Set(pinnedIds.filter((id) => typeof id === 'string' && id.length > 0)));
+  await setDoc(userProfileDoc(uid), { pinnedPromptIds: uniqueIds, updatedAt: Date.now() }, { merge: true });
+}
+
 export function formatAuthError(error: unknown): string {
   const code = (error as { code?: string })?.code ?? '';
   switch (code) {
@@ -129,6 +164,9 @@ export function formatAuthError(error: unknown): string {
       return 'Password must be at least 6 characters.';
     case 'auth/network-request-failed':
       return 'Network error. Please check your connection and try again.';
+    case 'auth/configuration-not-found':
+    case 'auth/operation-not-allowed':
+      return 'Email/Password sign-in is not enabled in Firebase Console yet. Enable Authentication → Email/Password for this project.';
     default:
       return error instanceof Error ? error.message : 'Authentication failed. Please try again.';
   }

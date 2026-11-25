@@ -11,38 +11,38 @@ const STORAGE_KEY = 'lazy_prompt_items';
 
 export const STARTER_PROMPTS: PromptItem[] = [
   {
-    id: 'starter-tldr',
+    id: 'starter-quick-summary',
     title: 'Quick Summary',
     category: 'Summary',
     instruction:
-      'Summarize the provided text into 5 concise, high-signal bullet points. Lead with the core thesis and include only essential facts or numbers.',
+      'Summarize the provided text in up to 5 crisp bullets (max 15 words each). Lead with the main claim and include only facts, numbers, and names directly stated in the text.',
     order: 0,
     updatedAt: 1,
   },
   {
-    id: 'starter-takeaways',
+    id: 'starter-key-takeaways',
     title: 'Key Takeaways',
     category: 'Insights',
     instruction:
-      'Extract the most actionable takeaways, key decisions, and open questions from this content. Group them cleanly under short Markdown headings.',
+      'Extract up to 5 actionable takeaways and concrete decisions explicitly supported by the provided text. Output concise Markdown bullets under 2 short headings max.',
     order: 1,
     updatedAt: 1,
   },
   {
-    id: 'starter-eli5',
-    title: 'Explain Simply',
+    id: 'starter-explain-simply',
+    title: "Explain Like I'm 5",
     category: 'Learning',
     instruction:
-      'Explain the main concepts in plain, jargon-free English as if explaining to a curious beginner. Use one concrete everyday analogy.',
+      "Explain this concept as if I'm 5 years old. Use simple language, relatable analogies, and everyday examples. Break complex ideas into small, easy-to-understand steps. Focus on what it is, why it matters, and how it works. Avoid unnecessary jargon without sacrificing accuracy or losing the core meaning.",
     order: 2,
     updatedAt: 1,
   },
   {
-    id: 'starter-tech-docs',
-    title: 'Technical Breakdown',
+    id: 'starter-code-docs',
+    title: 'Code & Docs Breakdown',
     category: 'Engineering',
     instruction:
-      'Break down this technical content for a software engineer: state the purpose, architecture or API surface, prerequisites, gotchas, and a minimal usage example if applicable.',
+      'Break down this technical text strictly from the source: **Purpose**, **API / Components**, **Usage Pattern** (short snippet only if in text), and **Constraints**. Keep each item compact.',
     order: 3,
     updatedAt: 1,
   },

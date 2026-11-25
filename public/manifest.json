@@ -3,7 +3,7 @@
   "name": "Espresso",
   "short_name": "Espresso",
   "version": "1.0.0",
-  "description": "Instant one-click Hybrid AI shots for any webpage — powered by on-device Gemini Nano with automatic Gemini Cloud fallback.",
+  "description": "Instant 1-click Hybrid AI shots & offline PDF analysis — Gemini Nano 4 on-device first with seamless Gemini Cloud fallback.",
   "permissions": [
     "sidePanel",
     "activeTab",
@@ -13,7 +13,8 @@
   ],
   "host_permissions": [
     "http://*/*",
-    "https://*/*"
+    "https://*/*",
+    "file://*/*"
   ],
   "action": {
     "default_title": "Open Espresso",
